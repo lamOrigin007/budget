@@ -1,238 +1,228 @@
-# Система учёта расходов членов семьи и ведения семейного бюджета
+# Family Budget
 
-## 1. Цели и задачи
+## Обзор
+Система учёта расходов членов семьи и ведения семейного бюджета. Решает задачи совместного планирования, контроля лимитов, учёта долгов, накоплений и обмена финансовыми данными между участниками семьи.
 
-- **Цель**: предоставить семье единое приложение для планирования бюджета, учёта доходов/расходов, контроля лимитов, долгов/займов, накоплений и совместного использования финансовых данных.
-- **Задачи**:
-  - Поддержка нескольких семей и ролей пользователей (владелец, взрослый, подросток/гость с ограничениями).
-  - Совместные и личные бюджеты, категории, цели накоплений, «конверты» (envelopes).
-  - Бюджеты (месяц/неделя/период) с лимитами по категориям и переносом остатков.
-  - Счета (наличные/карта/банк/электронный кошелёк), категории (иерархия), транзакции (расход/доход/перевод).
-  - Регулярные операции, напоминания, импорт выписок (CSV/Excel), мультивалютность с историческими курсами.
-  - Аналитика (дашборды, отчёты, фильтры), экспорт (CSV/PDF).
-  - Офлайн-режим на мобильных устройствах с последующей синхронизацией.
-  - Уведомления о превышении лимитов, дедлайнах платежей и достижении целей.
-  - Реалтайм-обновления (WebSocket) и push/email-уведомления.
-  - Учёт долгов и напоминания.
+### Цели
+- Предоставить единую платформу для семей с 2–10 пользователями.
+- Обеспечить доступ с веба (десктоп/мобайл), Android и iOS.
+- Поддержать локализацию (RU, подготовка к EN) и мультивалютность.
+
+### Пользователи
+- Владелец семьи — управляет настройками, лимитами, членами семьи.
+- Взрослый участник — добавляет операции, бюджеты, управляет счётами.
+- Подросток/гость — ограниченные права, видимость только разрешённых данных.
 
 ---
 
-## 2. Область применения и пользователи
-- Пользователи: члены семьи (2–10 пользователей на семью).
-- Платформы: веб (десктоп/мобайл), Android, iOS.
-- Языки интерфейса: RU (базово), EN (готовность к i18n).
+## Архитектура системы
+```
+┌─────────────┐    REST + WebSocket    ┌────────────────────┐
+│  Next.js    │◄──────────────────────►│       Go API       │
+│  Frontend   │                        │ (Echo/Fiber, sqlc) │
+└─────────────┘                        └─────────┬──────────┘
+        ▲                                      Background
+        │ GraphQL/REST SDK                     Workers/Jobs
+        │                                            │
+┌─────────────┐                                    ▼
+│ Android/iOS │◄────────────── Sync/API ─────────┌───────┐
+│  Клиенты    │                                  │Redis? │
+└─────────────┘                                  └───────┘
+        │                                            │
+        └─────────────── gRPC/HTTP ──────────────────┘
+                         │
+                     ┌───────┐
+                     │Postgre│
+                     │  SQL  │
+                     └───────┘
+```
+- **Backend**: модульный сервис на Go (Echo или Fiber), REST API + WebSocket, фоновые задачи, Redis/NATS при необходимости.
+- **Frontend**: Next.js + TypeScript, Zustand/Redux Toolkit, React Query, WebSocket/SSE для реалтайм-обновлений.
+- **Мобильные клиенты**: Kotlin (Android, Jetpack Compose, Room, WorkManager), Swift (iOS, SwiftUI, CoreData/SQLite, BackgroundTasks).
+- **Хранилище**: PostgreSQL ≥14, миграции через golang-migrate, кэш Redis.
+- **Инфраструктура**: Docker/Compose/Helm, окружения dev/stage/prod, деплой в облако (Fly.io/Render/Kubernetes).
 
 ---
 
-## 3. Архитектура и стек
-- **Архитектурный стиль**: модульный backend на Go с REST API + WebSocket для событий; фоновая обработка задач; репликация чтения (опц.), кэширование.
-- **Бэкенд (Go)**:
-  - Фреймворк: Echo или Fiber (на выбор в реализации).
-  - ORM/SQL: sqlc или gorm (предпочтительно sqlc + миграции golang-migrate).
-  - Авторизация/аутентификация: JWT (access+refresh), OAuth2 (опц.).
-  - Асинхронные задачи/очередь: Redis Streams / NATS (опц.).
-  - Валюта/курсы: внутренняя служба + поставщик (ECB/фиксированные таблицы).
-  - Отчёты и PDF: wkhtmltopdf/WeasyPrint через сервис отчётов.
-- **База данных**: PostgreSQL (>=14). Индексы, FK, ограничения, партиционирование по дате (опц. для крупных таблиц).
-- **Кэш**: Redis для сессий, rate limiting, короткоживущих справочников.
-- **Фронтенд (веб)**: React + TypeScript + Next.js (SSR/SSG), Zustand/Redux Toolkit, React Query, TailwindCSS. Реактивность через WebSocket/SSE, оптимистичные апдейты.
-- **Android**: Kotlin, Jetpack Compose, Room (локальный кэш), WorkManager для синка, Ktor client.
-- **iOS**: Swift, SwiftUI, CoreData/SQLite (локальный кэш), BackgroundTasks для синка, URLSession/Alamofire.
-- **CI/CD**: GitHub Actions (линт/тест/миграции/сборка докеров/деплой).
-- **Инфраструктура**: Docker + Compose/Helm, окружения dev/stage/prod. Облачное развёртывание (например, Fly.io/Render/Kubernetes).
+## Ключевые возможности
+- Совместные и личные бюджеты с лимитами по категориям и переносом остатка.
+- Категории с иерархией, конверты и цели накоплений.
+- Импорт банковских выписок (CSV/Excel) с маппингом колонок и предпросмотром.
+- Регулярные операции, напоминания, учёт долгов и займов.
+- Мультивалютность с хранением исторических курсов и перерасчётом в базовой валюте семьи.
+- Аналитика (дашборды, отчёты, фильтры) и экспорт в CSV/PDF.
+- Офлайн-режим на мобильных устройствах с последующей синхронизацией.
+- Уведомления (push/email) и реалтайм-события (WebSocket).
+- RBAC, аудит действий и безопасность (Argon2id/BCrypt, JWT, rate limiting).
 
 ---
 
-## 4. Модель данных (основные сущности)
-- **users**: id, family_id, email (уник.), password_hash, name, role [owner|adult|junior], locale, currency_default, created_at, updated_at.
+## Модель данных (основные сущности)
+- **users**: id, family_id, email, password_hash, name, role [owner|adult|junior], locale, currency_default, created_at, updated_at.
 - **families**: id, name, country, currency_base, created_at.
 - **accounts**: id, family_id, name, type [cash|card|bank|e-wallet], currency, balance (расчётный), is_archived, created_at.
-- **categories**: id, family_id, parent_id (nullable), name, type [expense|income|transfer], color, is_system.
+- **categories**: id, family_id, parent_id, name, type [expense|income|transfer], color, is_system.
 - **budgets**: id, family_id, period [month|week|custom], start_date, end_date, total_limit, currency.
 - **budget_items**: id, budget_id, category_id, limit_amount, carryover [bool].
-- **transactions**: id, family_id, account_id, category_id, user_id, type [expense|income|transfer], amount_minor (int64), currency, exchange_rate, amount_base_minor, description, merchant, tags[], occurred_at, created_at, updated_at, recurrence_id (nullable).
+- **transactions**: id, family_id, account_id, category_id, user_id, type [expense|income|transfer], amount_minor, currency, exchange_rate, amount_base_minor, description, merchant, tags[], occurred_at, created_at, updated_at, recurrence_id.
 - **recurrences**: id, family_id, rule (RRULE/cron-like), next_run_at, template_json.
-- **envelopes**: id, family_id, name, currency, target_amount_minor, current_amount_minor, auto_fill_rule (nullable).
-- **goals**: id, family_id, name, target_amount_minor, due_date (nullable), priority.
+- **envelopes**: id, family_id, name, currency, target_amount_minor, current_amount_minor, auto_fill_rule.
+- **goals**: id, family_id, name, target_amount_minor, due_date, priority.
 - **debts**: id, family_id, counterparty, direction [we_owe|they_owe], amount_minor, currency, due_date, notes.
 - **attachments**: id, family_id, transaction_id, file_url, mime, size.
 - **audit_logs**: id, family_id, user_id, action, entity, entity_id, payload_json, created_at.
 - **invites**: id, family_id, email, role, token, expires_at, accepted_at.
-- **exchange_rates**: id, base, quote, rate, as_of (date).
+- **exchange_rates**: id, base, quote, rate, as_of.
 
 Замечания:
 - Денежные суммы — в minor units (целые числа) для точности.
-- Все суммы дублируются в базовой валюте семьи (amount_base_minor) по курсу на дату операции.
+- Дублирование сумм в базовой валюте семьи (amount_base_minor) по курсу на дату операции.
 - Полнотекстовый поиск по описанию/тегам транзакций (pg_trgm / FTS).
 
 ---
 
-## 5. Функциональные требования
-
-### 5.1 Управление пользователями и семьями
+## Функциональные возможности
+### Управление пользователями и семьями
 - Регистрация/вход, восстановление пароля, приглашение в семью по роли.
-- Редактирование профиля, смена базовой валюты/языка (пересчёт — только отображение, не меняет историю).
+- Редактирование профиля, смена базовой валюты/языка (пересчёт на клиенте).
 
-### 5.2 Счета и категории
-- CRUD счетов, типы счетов, архивация.
-- Древовидные категории, системные (по умолчанию) + пользовательские.
+### Счета и категории
+- CRUD счетов, типы, архивация.
+- Древовидные категории, системные + пользовательские.
 
-### 5.3 Операции (транзакции)
-- Создание/редактирование/удаление, вложения (чеки), теги, мерчант.
+### Операции и импорт
+- CRUD транзакций, вложения (чеки), теги, мерчант.
 - Переводы между счетами (двойная запись).
-- Импорт CSV/Excel с маппингом колонок и предпросмотром.
-- Регулярные операции (RRULE), авто-проведение.
-- Мультивалютность, исторический курс (фиксируется на дату).
+- Импорт CSV/Excel, регулярные операции, мультивалютность.
 
-### 5.4 Бюджеты и конверты
-- Периодические бюджеты: общий лимит + лимиты на категории.
-- Перенос остатка (carryover) между периодами.
-- Конверты: ручное и авто-пополнение по правилам (например, в начало месяца).
+### Бюджеты, конверты, цели, долги
+- Периодические бюджеты, перенос остатка, конверты с авто-пополнением.
+- Цели накоплений и долги с напоминаниями.
 
-### 5.5 Цели и долги
-- Цели: прогресс, сроки, приоритеты, автопополнение из конвертов.
-- Долги: учёт, напоминания о сроках.
+### Аналитика и отчёты
+- Дашборды, фильтры, экспорт отчётов, сохранённые пресеты.
 
-### 5.6 Аналитика и отчёты
-- Дашборд: расходы/доходы по периодам, категориям, аккаунтам; тренды.
-- Фильтры: дата, участник, категория, тег, мерчант, сумма/диапазон.
-- Экспорт отчетов (CSV/PDF), сохранённые пресеты отчётов.
+### Уведомления и события
+- Push/email, реалтайм WebSocket для ключевых событий (лимит достигнут, операция создана и т. д.).
 
-### 5.7 Уведомления и события
-- Push/email: превышение лимита, успешный импорт, напоминания, выполненные цели.
-- Реалтайм обновления в веб/мобилках (WebSocket): «операция добавлена», «лимит достигнут» и т. п.
-
-### 5.8 Офлайн-режим (мобилки)
-- Кэширование справочников и последних N периодов.
-- Очередь локальных изменений, конфликт-резолв: «последняя правка выигрывает», с журналированием.
+### Офлайн-режим
+- Кэш справочников, очередь локальных изменений, стратегия «последняя правка выигрывает».
 
 ---
 
-## 6. Нефункциональные требования
-- **Производительность**: p95 < 150 мс на основные API; пакетный импорт 5–10k строк за < 60 сек (бэкграунд).
-- **Масштабируемость**: горизонтальное масштабирование API; БД — индексы, потенциально шардинг по family_id (в будущем).
-- **Надёжность**: SLO доступности API 99.9%. Резервное копирование БД (ежедневно, хранение 30 дней).
-- **Безопасность**:
-  - Пароли — Argon2id/BCrypt.
-  - JWT c ротацией refresh.
-  - RBAC на уровне family_id.
-  - Политики строк (RLS) в PostgreSQL (опц.), или строгая фильтрация по family_id во всех запросах.
-  - Валидация входных данных, защита от CSRF (для cookie, если применимо), rate limiting.
-- **Конфиденциальность**: шифрование at-rest (S3/KMS для вложений), TLS in-transit. Логи без PII/минимизация.
-- **Локализация и форматы**: i18n, формат дат/валют по локали пользователя.
+## Нефункциональные требования
+- **Производительность**: p95 < 150 мс на основные API, импорт 5–10k строк < 60 сек (background).
+- **Масштабируемость**: горизонтальное масштабирование API, шардирование по family_id в будущем.
+- **Надёжность**: SLO доступности 99.9%, ежедневные бэкапы (30 дней хранения).
+- **Безопасность**: Argon2id/BCrypt, JWT с ротацией refresh, RBAC, RLS/фильтрация по family_id, CSRF защита, rate limiting.
+- **Конфиденциальность**: шифрование at-rest (S3/KMS), TLS in-transit, минимизация PII в логах.
+- **Локализация**: i18n, формат дат/валют по локали.
 
 ---
 
-## 8. UX/Функциональные сценарии
-- **Первичная настройка семьи**: создание семьи, базовой валюты, импорт системных категорий, мастер добавления первых счетов.
-- **Создание бюджета месяца**: выбор категорий, установка лимитов, включение переноса остатков.
-- **Добавление расходов на ходу (оффлайн)**: быстрый ввод, автоподстановка категории по мерчанту/описанию.
-- **Импорт выписки из банка**: загрузка CSV, маппинг колонок, подсказки по дублированию, пакетное проведение.
-- **Уведомления**: при 80% и 100% лимита категории; при приближении платежа/долга; при достижении цели.
-- **Совместная работа**: разграничение прав (дети видят только свои карманные расходы, не видят доходы родителей, и т. п.).
-
----
-
-## 9. Тестирование и качество
-- **Юнит-тесты**: покрытие доменной логики > 70%.
-- **Интеграционные тесты**: API + БД (через docker-compose) на CRUD, импорты, мультивалютность, бюджеты, RLS фильтрацию.
-- **Контрактные тесты**: OpenAPI + генерация клиентов (TS/Kotlin/Swift).
-- **E2E**: Playwright (веб), Detox/Jetpack Compose tests (мобилки).
-- **Нагрузочные**: JMeter/k6 — сценарии импорта и массовых чтений.
-
----
-
-## 10. Логи, мониторинг, алерты
-- **Логирование**: JSON, уровни по RFC5424, трейсинг (OpenTelemetry).
-- **Метрики**: Prometheus (RPS, p95/99, ошибки, очередь задач, время миграций).
-- **Алерты**: SLO, рост 5xx, деградация зависимостей (БД, Redis).
-- **Аудит**: события CRUD по ключевым сущностям.
-
----
-
-## 11. Требования к безопасности и приватности
-- **GDPR-совместимость**: право на удаление/выгрузку данных (Data Export/Deletion API).
-- **Управление доступом**: по family_id + роли; запрет межсемейного доступа.
-- **Резервное копирование**: ежедневные бэкапы БД, проверка восстановления еженедельно.
-- **Secret-management**: .env для dev, в prod — KMS/Secret Manager.
-- **Пароли**: Argon2id/BCrypt.
-- JWT с ротацией (access + refresh), rate limiting, валидация входных данных.
-- Вложения — в зашифрованном объектном хранилище.
-- Журнал аудита для ключевых действий.
-
----
-
-## 12. Развёртывание и миграции
-- **Миграции**: golang-migrate, стратегия up/down, запрет destructive миграций без резервного копирования.
-- **Версионирование API**: /api/v1 (с подготовкой к /v2).
-- **Rollout**: Blue-Green/Canary (если Kubernetes).
-- **Артефакты**: Docker-образы для API/отчётного сервиса; статика фронтенда (CDN).
-
----
-
-## 13. Рекомендации по реализации
-- Строгая типизация денег (value object), единая библиотека валют/форматов.
-- «Мягкое удаление» (deleted_at) для транзакций и справочников.
+## Архитектурные рекомендации
+- Строгая типизация денег, единый модуль валют.
+- Мягкое удаление (deleted_at) для справочников и операций.
 - Идемпотентность импортов (idempotency-key).
-- Migrations + seed системных категорий.
 - OpenAPI-спека и автогенерация клиентов (TS/Kotlin/Swift).
-- Деньги: `amount_minor` (`BIGINT`) + `currency` (ISO-4217, 3 символа). Все суммы дублируются в базовой валюте семьи (`amount_base_minor`).
-- Время: `TIMESTAMPTZ` (UTC). Отображение форматов — на клиенте.
-- Мягкое удаление: `deleted_at` (nullable).
-- Идентификаторы: `UUID` (v4).
+- Время: `TIMESTAMPTZ` (UTC), отображение по локали на клиенте.
+- Идентификаторы: UUID v4.
 
 ---
 
-### Локальный запуск
-```bash
-docker compose up --build
-```
-После старта приложение доступно на `http://localhost:8080`.
-
-Проверьте работу API:
-
-- [http://localhost:8080/healthz](http://localhost:8080/healthz)
-- [http://localhost:8080/swagger/](http://localhost:8080/swagger/)
-
-### Быстрый старт (БД)
-```bash
-docker run --name fb-postgres -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=family_budget -d postgres:15
-# Применить миграции:
-docker run --rm -v $(pwd):/repo --network host migrate/migrate \
-  -path=/repo/migrations -database "postgres://postgres:postgres@localhost:5432/family_budget?sslmode=disable" up
-```
-
-### Рекомендуемая структура проекта
-```
-backend/
-  cmd/api/
-  internal/
-    http/
-    auth/
-    domain/
-    store/
-    migrate/
-web/
-  app/
-  components/
-mobile/
-  android/
-  ios/
-migrations/
-  0001_init.sql
-openapi.yaml
-```
+## Архитектура CI/CD и качество
+- GitHub Actions: линтеры, тесты, миграции, сборка Docker-образов, деплой.
+- Тестирование: юнит (>70% доменной логики), интеграционные (API+БД), контрактные (OpenAPI), E2E (Playwright, Detox/Compose), нагрузочные (k6/JMeter).
+- Логирование: JSON, OpenTelemetry, аудит CRUD.
+- Мониторинг: Prometheus, алерты по SLO/SLA, очередям задач.
 
 ---
 
-## 4) API и контракты
+## Badges
+- CI: _TODO (GitHub Actions badge)_
+- Линтеры: _TODO_
+- Тесты: _TODO_
 
-- OpenAPI-спецификация: **`openapi.yaml`** (v1). Генерация клиентов:
-  - TypeScript: `npx openapi-typescript openapi.yaml -o web/src/lib/api.ts`
-  - Kotlin/Swift: используйте OpenAPI Generator
-- Swagger-документация генерируется командой:
+---
+
+## Документация
+- [Импорт выписок](docs/imports.md)
+- [Мультивалютность](docs/currency.md)
+- [Каталог событий](docs/events.md)
+- [Офлайн-синхронизация](docs/offline-sync.md)
+- [API Governance](docs/api-governance.md)
+- [Бюджеты и Carryover](docs/budgets.md)
+- Дополнительно: `openapi.yaml`, директория миграций `/migrations`.
+
+---
+
+## Запуск локально
+1. **Docker Compose**
+   ```bash
+   docker compose up --build
+   ```
+   Приложение поднимется на `http://localhost:8080`.
+
+2. **Проверка API**
+   - http://localhost:8080/healthz
+   - http://localhost:8080/swagger/
+
+3. **Только БД + миграции**
+   ```bash
+   docker run --name fb-postgres -p 5432:5432 \
+     -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=family_budget -d postgres:15
+
+   docker run --rm -v $(pwd):/repo --network host migrate/migrate \
+     -path=/repo/migrations \
+     -database "postgres://postgres:postgres@localhost:5432/family_budget?sslmode=disable" up
+   ```
+
+4. **Запуск backend вручную**
+   ```bash
+   cd backend
+   go run ./cmd/api
+   ```
+
+---
+
+## Разработка
+- **OpenAPI**: `openapi.yaml` в корне репозитория. Генерация:
   ```bash
-  swag init -g backend/cmd/api/main.go
+  npx openapi-typescript openapi.yaml -o web/src/lib/api.ts
   ```
-- Аутентификация: JWT (access/refresh), роль + family_id
-- Пагинация: `?page=1&page_size=50` + заголовок `X-Total-Count`
+  Для Kotlin/Swift используйте OpenAPI Generator.
+- **Миграции**: `/migrations`, выполняются через `golang-migrate`.
+- **CI/CD**: GitHub Actions — lint/test/build/deploy (см. `.github/workflows/*`).
+- **Структура проекта (рекомендация)**:
+  ```
+  backend/
+    cmd/api/
+    internal/
+      http/
+      auth/
+      domain/
+      store/
+      migrate/
+  web/
+    app/
+    components/
+  mobile/
+    android/
+    ios/
+  migrations/
+  openapi.yaml
+  ```
+
+---
+
+## Развёртывание
+- Версионирование API: `/api/v1` с подготовкой к `/v2`.
+- Rollout: Blue-Green/Canary (Kubernetes), сборка Docker-образов для API/отчётного сервиса.
+- Секреты: .env для dev, KMS/Secret Manager для prod.
+- Резервное копирование БД и проверка восстановления еженедельно.
+
+---
+
+## Лицензия
+Проект распространяется под лицензией MIT. См. [LICENSE](LICENSE).
+
