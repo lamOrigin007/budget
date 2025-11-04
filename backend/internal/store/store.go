@@ -16,6 +16,8 @@ type Store struct {
 	db *sql.DB
 }
 
+var ErrAccountArchived = errors.New("account is archived")
+
 func New(db *sql.DB) *Store {
 	return &Store{db: db}
 }
@@ -40,6 +42,47 @@ func (s *Store) CreateUser(ctx context.Context, user *domain.User, passwordHash 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		user.ID, user.FamilyID, user.Email, passwordHash, user.Name, user.Role, user.Locale, user.CurrencyDefault, user.CreatedAt, user.UpdatedAt)
 	return err
+}
+
+func (s *Store) CreateAccount(ctx context.Context, account *domain.Account) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO accounts (id, family_id, name, type, currency, balance_minor, is_archived, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		account.ID, account.FamilyID, account.Name, account.Type, account.Currency, account.BalanceMinor, account.IsArchived, account.CreatedAt, account.UpdatedAt)
+	return err
+}
+
+func (s *Store) ListAccountsByFamily(ctx context.Context, familyID string) ([]domain.Account, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, family_id, name, type, currency, balance_minor, is_archived, created_at, updated_at FROM accounts WHERE family_id = ? ORDER BY created_at`, familyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []domain.Account
+	for rows.Next() {
+		var account domain.Account
+		var isArchived bool
+		if err := rows.Scan(&account.ID, &account.FamilyID, &account.Name, &account.Type, &account.Currency, &account.BalanceMinor, &isArchived, &account.CreatedAt, &account.UpdatedAt); err != nil {
+			return nil, err
+		}
+		account.IsArchived = isArchived
+		accounts = append(accounts, account)
+	}
+	return accounts, rows.Err()
+}
+
+func (s *Store) GetAccount(ctx context.Context, id string) (*domain.Account, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, family_id, name, type, currency, balance_minor, is_archived, created_at, updated_at FROM accounts WHERE id = ?`, id)
+	var account domain.Account
+	var isArchived bool
+	if err := row.Scan(&account.ID, &account.FamilyID, &account.Name, &account.Type, &account.Currency, &account.BalanceMinor, &isArchived, &account.CreatedAt, &account.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	account.IsArchived = isArchived
+	return &account, nil
 }
 
 func (s *Store) FindUserByEmail(ctx context.Context, email string) (*domain.User, error) {
@@ -165,14 +208,73 @@ func nullableString(value string) interface{} {
 }
 
 func (s *Store) CreateTransaction(ctx context.Context, txn *domain.Transaction) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO transactions (id, family_id, user_id, category_id, type, amount_minor, currency, comment, occurred_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		txn.ID, txn.FamilyID, txn.UserID, txn.CategoryID, txn.Type, txn.AmountMinor, txn.Currency, nullableString(txn.Comment), txn.OccurredAt, txn.CreatedAt, txn.UpdatedAt)
-	return err
+	dbTx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = dbTx.Rollback()
+		}
+	}()
+
+	row := dbTx.QueryRowContext(ctx, `SELECT family_id, balance_minor, is_archived FROM accounts WHERE id = ?`, txn.AccountID)
+	var accountFamily string
+	var accountBalance int64
+	var isArchived bool
+	if scanErr := row.Scan(&accountFamily, &accountBalance, &isArchived); scanErr != nil {
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			err = sql.ErrNoRows
+			return err
+		}
+		err = scanErr
+		return err
+	}
+	_ = accountBalance
+	if accountFamily != txn.FamilyID {
+		err = sql.ErrNoRows
+		return err
+	}
+	if isArchived {
+		err = ErrAccountArchived
+		return err
+	}
+
+	delta := txn.AmountMinor
+	if strings.ToLower(txn.Type) == "expense" {
+		delta = -delta
+	}
+
+	res, execErr := dbTx.ExecContext(ctx, `UPDATE accounts SET balance_minor = balance_minor + ?, updated_at = ? WHERE id = ? AND family_id = ?`, delta, txn.UpdatedAt, txn.AccountID, txn.FamilyID)
+	if execErr != nil {
+		err = execErr
+		return err
+	}
+	if affected, affErr := res.RowsAffected(); affErr != nil {
+		err = affErr
+		return err
+	} else if affected == 0 {
+		err = sql.ErrNoRows
+		return err
+	}
+
+	_, execErr = dbTx.ExecContext(ctx, `INSERT INTO transactions (id, family_id, user_id, account_id, category_id, type, amount_minor, currency, comment, occurred_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		txn.ID, txn.FamilyID, txn.UserID, txn.AccountID, txn.CategoryID, txn.Type, txn.AmountMinor, txn.Currency, nullableString(txn.Comment), txn.OccurredAt, txn.CreatedAt, txn.UpdatedAt)
+	if execErr != nil {
+		err = execErr
+		return err
+	}
+
+	if commitErr := dbTx.Commit(); commitErr != nil {
+		err = commitErr
+		return err
+	}
+	return nil
 }
 
 func (s *Store) ListTransactionsByUser(ctx context.Context, userID string, start, end *time.Time) ([]domain.Transaction, error) {
-	baseQuery := `SELECT id, family_id, user_id, category_id, type, amount_minor, currency, comment, occurred_at, created_at, updated_at FROM transactions WHERE user_id = ?`
+	baseQuery := `SELECT id, family_id, user_id, account_id, category_id, type, amount_minor, currency, comment, occurred_at, created_at, updated_at FROM transactions WHERE user_id = ?`
 	args := []interface{}{userID}
 	if start != nil {
 		baseQuery += " AND occurred_at >= ?"
@@ -194,7 +296,7 @@ func (s *Store) ListTransactionsByUser(ctx context.Context, userID string, start
 	for rows.Next() {
 		var txn domain.Transaction
 		var comment sql.NullString
-		if err := rows.Scan(&txn.ID, &txn.FamilyID, &txn.UserID, &txn.CategoryID, &txn.Type, &txn.AmountMinor, &txn.Currency, &comment, &txn.OccurredAt, &txn.CreatedAt, &txn.UpdatedAt); err != nil {
+		if err := rows.Scan(&txn.ID, &txn.FamilyID, &txn.UserID, &txn.AccountID, &txn.CategoryID, &txn.Type, &txn.AmountMinor, &txn.Currency, &comment, &txn.OccurredAt, &txn.CreatedAt, &txn.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if comment.Valid {

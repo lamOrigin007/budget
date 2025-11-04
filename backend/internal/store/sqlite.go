@@ -51,20 +51,33 @@ func migrate(db *sql.DB) error {
             created_at TIMESTAMP NOT NULL,
             updated_at TIMESTAMP NOT NULL
         );`,
+		`CREATE TABLE IF NOT EXISTS accounts (
+            id TEXT PRIMARY KEY,
+            family_id TEXT NOT NULL REFERENCES families(id),
+            name TEXT NOT NULL,
+            type TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            balance_minor INTEGER NOT NULL DEFAULT 0,
+            is_archived INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP NOT NULL,
+            updated_at TIMESTAMP NOT NULL
+        );`,
 		`CREATE TABLE IF NOT EXISTS transactions (
             id TEXT PRIMARY KEY,
             family_id TEXT NOT NULL REFERENCES families(id),
             user_id TEXT NOT NULL REFERENCES users(id),
+            account_id TEXT NOT NULL REFERENCES accounts(id),
             category_id TEXT NOT NULL REFERENCES categories(id),
             type TEXT NOT NULL,
             amount_minor INTEGER NOT NULL,
             currency TEXT NOT NULL,
-            description TEXT,
+            comment TEXT,
             occurred_at TIMESTAMP NOT NULL,
             created_at TIMESTAMP NOT NULL,
             updated_at TIMESTAMP NOT NULL
         );`,
 		`CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_accounts_family ON accounts(family_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_categories_family ON categories(family_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_users_family ON users(family_id);`,
 	}
@@ -80,6 +93,8 @@ func migrate(db *sql.DB) error {
 		`ALTER TABLE categories ADD COLUMN description TEXT;`,
 		`ALTER TABLE categories ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE categories ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;`,
+		`ALTER TABLE transactions ADD COLUMN account_id TEXT REFERENCES accounts(id);`,
+		`ALTER TABLE transactions ADD COLUMN comment TEXT;`,
 	}
 
 	for _, stmt := range alterStatements {

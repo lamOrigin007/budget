@@ -34,6 +34,8 @@ function isWithinPeriod(occurredAt: string, start: string, end: string): boolean
   return occurred >= startTime && occurred <= endTime;
 }
 import {
+  Account,
+  AccountPayload,
   Category,
   CategoryPayload,
   RegisterResponse,
@@ -41,21 +43,32 @@ import {
 } from '../src/lib/api';
 import {
   registerUser,
-  fetchCategories,
+  fetchAccounts,
   createTransaction,
   fetchTransactions,
   createCategory,
   updateCategory,
-  setCategoryArchived
+  setCategoryArchived,
+  createAccount
 } from '../src/lib/api';
 
 type Step = 'register' | 'dashboard';
+
+const accountTypeLabels: Record<Account['type'], string> = {
+  cash: 'Наличные',
+  card: 'Карта',
+  bank: 'Банковский счёт',
+  deposit: 'Вклад',
+  wallet: 'Электронный кошелёк'
+};
 
 export default function Home() {
   const [step, setStep] = useState<Step>('register');
   const [registerError, setRegisterError] = useState<string | null>(null);
   const [userData, setUserData] = useState<RegisterResponse | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
   const [transactionsError, setTransactionsError] = useState<string | null>(null);
@@ -65,6 +78,8 @@ export default function Home() {
   const [isCategorySubmitting, setIsCategorySubmitting] = useState(false);
   const [categoryError, setCategoryError] = useState<string | null>(null);
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
+  const [isAccountSubmitting, setIsAccountSubmitting] = useState(false);
+  const [accountError, setAccountError] = useState<string | null>(null);
   const [categoryForm, setCategoryForm] = useState<{
     name: string;
     type: 'income' | 'expense' | 'transfer';
@@ -78,6 +93,17 @@ export default function Home() {
     description: '',
     parent_id: ''
   });
+  const [accountForm, setAccountForm] = useState<{
+    name: string;
+    type: Account['type'];
+    currency: string;
+    initial_balance_minor: string;
+  }>({
+    name: '',
+    type: 'cash',
+    currency: '',
+    initial_balance_minor: ''
+  });
   const [periodStart, setPeriodStart] = useState(() => formatDateInput(startOfCurrentMonth()));
   const [periodEnd, setPeriodEnd] = useState(() => formatDateInput(new Date()));
 
@@ -89,6 +115,30 @@ export default function Home() {
     () => categories.filter((category) => category.is_archived),
     [categories]
   );
+  const hasAccounts = accounts.length > 0;
+
+  function sortAccounts(list: Account[]) {
+    return [...list].sort((left, right) => left.name.localeCompare(right.name, 'ru'));
+  }
+
+  function formatMoney(valueMinor: number, currency: string) {
+    const value = valueMinor / 100;
+    return `${value.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
+  }
+
+  async function refreshAccounts(userId: string, preferredAccountId?: string) {
+    const list = sortAccounts(await fetchAccounts(userId));
+    setAccounts(list);
+    setSelectedAccountId((current) => {
+      if (preferredAccountId && list.some((account) => account.id === preferredAccountId)) {
+        return preferredAccountId;
+      }
+      if (current && list.some((account) => account.id === current)) {
+        return current;
+      }
+      return list[0]?.id ?? '';
+    });
+  }
 
   async function loadTransactionsForCurrentPeriod(userId: string) {
     const startIso = toRFC3339FromDateInput(periodStart);
@@ -135,8 +185,12 @@ export default function Home() {
         family_name: String(formData.get('family_name') ?? '')
       });
       setUserData(response);
-      const cats = await fetchCategories(response.user.id);
-      setCategories(sortCategories(cats));
+      setCategories(sortCategories(response.categories));
+      await refreshAccounts(response.user.id);
+      setAccountForm((prev) => ({
+        ...prev,
+        currency: response.user.currency_default
+      }));
       await loadTransactionsForCurrentPeriod(response.user.id);
       setStep('dashboard');
       event.currentTarget.reset();
@@ -151,23 +205,38 @@ export default function Home() {
     event.preventDefault();
     if (!userData) return;
     setCreateError(null);
+    if (!selectedAccountId) {
+      setCreateError('Сначала добавьте счёт');
+      return;
+    }
+    const account = accounts.find((item) => item.id === selectedAccountId);
+    if (!account) {
+      setCreateError('Выбранный счёт недоступен');
+      return;
+    }
     const formData = new FormData(event.currentTarget);
     setIsSavingTransaction(true);
     try {
       const occurredInput = String(formData.get('occurred_at') ?? '');
       const occurredAt = occurredInput ? new Date(occurredInput).toISOString() : new Date().toISOString();
+      const amountMinor = Number(formData.get('amount_minor') ?? 0);
+      if (!Number.isFinite(amountMinor) || amountMinor <= 0) {
+        throw new Error('Сумма должна быть больше нуля');
+      }
       const transaction = await createTransaction({
         user_id: userData.user.id,
+        account_id: account.id,
         category_id: String(formData.get('category_id') ?? ''),
         type: String(formData.get('type') ?? 'expense') as 'income' | 'expense',
-        amount_minor: Number(formData.get('amount_minor') ?? 0),
-        currency: userData.user.currency_default,
+        amount_minor: amountMinor,
+        currency: account.currency,
         comment: String(formData.get('comment') ?? '').trim(),
         occurred_at: occurredAt
       });
       if (isWithinPeriod(transaction.occurred_at, periodStart, periodEnd)) {
         setTransactions((prev) => sortTransactions([transaction, ...prev]));
       }
+      await refreshAccounts(userData.user.id, account.id);
       event.currentTarget.reset();
     } catch (error) {
       setCreateError(error instanceof Error ? error.message : 'Не удалось создать операцию');
@@ -227,6 +296,41 @@ export default function Home() {
       setCategoryError(error instanceof Error ? error.message : 'Не удалось сохранить категорию');
     } finally {
       setIsCategorySubmitting(false);
+    }
+  }
+
+  async function handleAccountSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!userData) return;
+    setAccountError(null);
+    setIsAccountSubmitting(true);
+
+    const payload: AccountPayload = {
+      name: accountForm.name.trim(),
+      type: accountForm.type
+    };
+    const currency = accountForm.currency.trim();
+    if (currency) {
+      payload.currency = currency.toUpperCase();
+    }
+    const initialBalance = Number(accountForm.initial_balance_minor);
+    if (Number.isFinite(initialBalance) && initialBalance !== 0) {
+      payload.initial_balance_minor = initialBalance;
+    }
+
+    try {
+      const account = await createAccount(userData.user.id, payload);
+      await refreshAccounts(userData.user.id, account.id);
+      setAccountForm({
+        name: '',
+        type: 'cash',
+        currency: account.currency,
+        initial_balance_minor: ''
+      });
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : 'Не удалось создать счёт');
+    } finally {
+      setIsAccountSubmitting(false);
     }
   }
 
@@ -326,6 +430,100 @@ export default function Home() {
         </p>
       </section>
 
+      <section className="panel">
+        <h2>Счета и кошельки</h2>
+        <div
+          className="form-grid"
+          style={{ gridTemplateColumns: 'minmax(260px, 2fr) minmax(240px, 1fr)', gap: '1.5rem', alignItems: 'flex-start' }}
+        >
+          <div>
+            {accounts.length === 0 ? (
+              <p className="highlight">Создайте первый счёт, чтобы учитывать движения по наличным, карте или вкладу.</p>
+            ) : (
+              <ul className="transactions">
+                {accounts.map((account) => {
+                  const isSelected = account.id === selectedAccountId;
+                  const balance = formatMoney(account.balance_minor, account.currency);
+                  const balanceColor = account.balance_minor >= 0 ? '#34d399' : '#f87171';
+                  return (
+                    <li key={account.id} className="transaction-item">
+                      <div>
+                        <p style={{ fontWeight: 600, color: '#e2e8f0' }}>{account.name}</p>
+                        <p className="meta">{accountTypeLabels[account.type]}</p>
+                        <p className="meta">Валюта: {account.currency}</p>
+                        {isSelected && <p className="highlight">Активный счёт для новых операций</p>}
+                      </div>
+                      <div className="amount" style={{ color: balanceColor }}>
+                        {balance}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+          <form onSubmit={handleAccountSubmit} className="form-grid" style={{ gap: '0.75rem' }}>
+            <div className="input-group">
+              <label htmlFor="account_name">Название счёта</label>
+              <input
+                id="account_name"
+                name="account_name"
+                className="input"
+                value={accountForm.name}
+                onChange={(event) => setAccountForm((prev) => ({ ...prev, name: event.target.value }))}
+                placeholder="Например, Наличные"
+                required
+              />
+            </div>
+            <div className="input-group">
+              <label htmlFor="account_type">Тип</label>
+              <select
+                id="account_type"
+                name="account_type"
+                className="select"
+                value={accountForm.type}
+                onChange={(event) =>
+                  setAccountForm((prev) => ({ ...prev, type: event.target.value as Account['type'] }))
+                }
+              >
+                <option value="cash">Наличные</option>
+                <option value="card">Карта</option>
+                <option value="bank">Банковский счёт</option>
+                <option value="deposit">Вклад</option>
+                <option value="wallet">Электронный кошелёк</option>
+              </select>
+            </div>
+            <div className="input-group">
+              <label htmlFor="account_currency">Валюта</label>
+              <input
+                id="account_currency"
+                name="account_currency"
+                className="input"
+                value={accountForm.currency}
+                onChange={(event) => setAccountForm((prev) => ({ ...prev, currency: event.target.value }))}
+                placeholder={userData?.user.currency_default ?? 'RUB'}
+              />
+            </div>
+            <div className="input-group">
+              <label htmlFor="account_initial">Начальный баланс (в копейках)</label>
+              <input
+                id="account_initial"
+                name="account_initial"
+                className="input"
+                type="number"
+                value={accountForm.initial_balance_minor}
+                onChange={(event) => setAccountForm((prev) => ({ ...prev, initial_balance_minor: event.target.value }))}
+                placeholder="0"
+              />
+            </div>
+            {accountError && <p className="error" style={{ gridColumn: '1 / -1' }}>{accountError}</p>}
+            <button type="submit" className="button" disabled={isAccountSubmitting} style={{ gridColumn: '1 / -1' }}>
+              {isAccountSubmitting ? 'Сохранение...' : 'Добавить счёт'}
+            </button>
+          </form>
+        </div>
+      </section>
+
       <div className="dashboard-columns">
         <article className="panel">
           <h2>{editingCategoryId ? 'Редактирование категории' : 'Новая категория'}</h2>
@@ -415,15 +613,32 @@ export default function Home() {
           <h2>Новая операция</h2>
           <form onSubmit={handleCreateTransaction} className="form-grid">
             <div className="input-group">
+              <label htmlFor="account_id">Счёт</label>
+              <select
+                id="account_id"
+                name="account_id"
+                className="select"
+                value={selectedAccountId}
+                onChange={(event) => setSelectedAccountId(event.target.value)}
+                disabled={!hasAccounts}
+              >
+                {accounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.name} · {account.currency}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="input-group">
               <label htmlFor="type">Тип</label>
-              <select id="type" name="type" className="select">
+              <select id="type" name="type" className="select" disabled={!hasAccounts}>
                 <option value="expense">Расход</option>
                 <option value="income">Доход</option>
               </select>
             </div>
             <div className="input-group">
               <label htmlFor="category_id">Категория</label>
-              <select id="category_id" name="category_id" className="select">
+              <select id="category_id" name="category_id" className="select" disabled={!hasAccounts}>
                 {activeCategories.map((category) => (
                   <option key={category.id} value={category.id}>
                     {category.name}
@@ -433,18 +648,23 @@ export default function Home() {
             </div>
             <div className="input-group">
               <label htmlFor="amount_minor">Сумма (в копейках)</label>
-              <input id="amount_minor" name="amount_minor" type="number" min="1" required className="input" />
+              <input id="amount_minor" name="amount_minor" type="number" min="1" required className="input" disabled={!hasAccounts} />
             </div>
             <div className="input-group">
               <label htmlFor="occurred_at">Дата операции</label>
-              <input id="occurred_at" name="occurred_at" type="datetime-local" className="input" />
+              <input id="occurred_at" name="occurred_at" type="datetime-local" className="input" disabled={!hasAccounts} />
             </div>
             <div className="input-group">
               <label htmlFor="comment">Комментарий</label>
-              <textarea id="comment" name="comment" rows={3} className="textarea" />
+              <textarea id="comment" name="comment" rows={3} className="textarea" disabled={!hasAccounts} />
             </div>
+            {!hasAccounts && (
+              <p className="highlight" style={{ gridColumn: '1 / -1' }}>
+                Добавьте счёт, чтобы фиксировать операции.
+              </p>
+            )}
             {createError && <p className="error">{createError}</p>}
-            <button type="submit" disabled={isSavingTransaction} className="button">
+            <button type="submit" disabled={isSavingTransaction || !hasAccounts} className="button">
               {isSavingTransaction ? 'Сохранение...' : 'Добавить операцию'}
             </button>
           </form>
@@ -496,6 +716,7 @@ export default function Home() {
           <ul className="transactions">
             {transactions.map((transaction) => {
               const category = categories.find((cat) => cat.id === transaction.category_id);
+              const account = accounts.find((acc) => acc.id === transaction.account_id);
               const amount = (transaction.amount_minor / 100).toFixed(2);
               const sign = transaction.type === 'income' ? '+' : '-';
               const color = transaction.type === 'income' ? '#34d399' : '#f87171';
@@ -504,6 +725,7 @@ export default function Home() {
                   <div>
                     <p style={{ fontWeight: 600, color: category?.color ?? '#e2e8f0' }}>{category?.name ?? 'Категория'}</p>
                     <p className="meta">{new Date(transaction.occurred_at).toLocaleString()}</p>
+                    <p className="meta">Счёт: {account?.name ?? 'недоступно'}</p>
                     {transaction.comment && (
                       <p className="highlight" style={{ color: '#e2e8f0', marginTop: '0.35rem' }}>{transaction.comment}</p>
                     )}

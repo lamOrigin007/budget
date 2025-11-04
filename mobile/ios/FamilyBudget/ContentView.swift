@@ -46,6 +46,7 @@ struct ContentView: View {
     @State private var user: User? = nil
     @State private var family: Family? = nil
     @State private var categories: [Category] = []
+    @State private var accounts: [Account] = []
     @State private var isLoading = false
     @State private var categoryName = ""
     @State private var categoryType: CategoryType = .expense
@@ -55,9 +56,16 @@ struct ContentView: View {
     @State private var editingCategoryId: String? = nil
     @State private var categoryMessage = ""
     @State private var isSavingCategory = false
+    @State private var accountNameInput = ""
+    @State private var accountTypeSelection: AccountKind = .cash
+    @State private var accountCurrencyInput = ""
+    @State private var accountInitialAmount = ""
+    @State private var accountMessage = ""
+    @State private var isSavingAccount = false
     @State private var transactions: [Transaction] = []
     @State private var transactionType: TransactionKind = .expense
     @State private var transactionCategoryId: String = ""
+    @State private var transactionAccountId: String = ""
     @State private var transactionAmount = ""
     @State private var transactionDate = Date()
     @State private var transactionComment = ""
@@ -130,6 +138,7 @@ struct ContentView: View {
                                 .foregroundColor(.secondary)
                         }
                     }
+                    accountsSection(userId: user.id)
                     categoryForm(userId: user.id)
                     categoryLists(userId: user.id)
                     Divider()
@@ -192,10 +201,14 @@ struct ContentView: View {
                 user = registerResponse.user
                 family = registerResponse.family
                 status = "Профиль создан для \(registerResponse.user.name)"
+                accounts = registerResponse.accounts.sorted { $0.createdAt < $1.createdAt }
+                ensureTransactionAccountSelection()
+                accountCurrencyInput = registerResponse.user.currencyDefault
                 refreshTransactionsForCurrentPeriod()
             }
 
             loadCategories(userId: registerResponse.user.id)
+            loadAccounts(userId: registerResponse.user.id)
         }.resume()
     }
 
@@ -214,6 +227,20 @@ struct ContentView: View {
                     return !lhs.isArchived && rhs.isArchived
                 }
                 ensureTransactionCategorySelection()
+            }
+        }.resume()
+    }
+
+    private func loadAccounts(userId: String) {
+        guard let url = URL(string: "http://localhost:8080/api/v1/users/\(userId)/accounts") else { return }
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            guard
+                let data = data,
+                let response = try? JSONDecoder().decode(AccountList.self, from: data)
+            else { return }
+            DispatchQueue.main.async {
+                accounts = response.accounts.sorted { $0.createdAt < $1.createdAt }
+                ensureTransactionAccountSelection()
             }
         }.resume()
     }
@@ -329,6 +356,64 @@ struct ContentView: View {
         editingCategoryId = nil
     }
 
+    private func saveAccount(for userId: String) {
+        let trimmedName = accountNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            accountMessage = "Название счёта обязательно"
+            return
+        }
+
+        guard let url = URL(string: "http://localhost:8080/api/v1/users/\(userId)/accounts") else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let trimmedCurrency = accountCurrencyInput.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let initialValue = Int64(accountInitialAmount) ?? 0
+        let payload = AccountPayload(
+            name: trimmedName,
+            type: accountTypeSelection.rawValue,
+            currency: trimmedCurrency.isEmpty ? nil : trimmedCurrency,
+            initialBalanceMinor: initialValue != 0 ? initialValue : nil
+        )
+
+        request.httpBody = try? JSONEncoder().encode(payload)
+        accountMessage = ""
+        isSavingAccount = true
+
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            DispatchQueue.main.async {
+                isSavingAccount = false
+            }
+            if let error = error {
+                DispatchQueue.main.async {
+                    accountMessage = "Ошибка: \(error.localizedDescription)"
+                }
+                return
+            }
+            guard
+                let data = data,
+                let response = try? JSONDecoder().decode(AccountResponse.self, from: data)
+            else {
+                DispatchQueue.main.async {
+                    accountMessage = "Некорректный ответ сервера"
+                }
+                return
+            }
+
+            DispatchQueue.main.async {
+                accountNameInput = ""
+                accountInitialAmount = ""
+                accountCurrencyInput = response.account.currency
+                accountTypeSelection = .cash
+                accountMessage = "Счёт добавлен"
+                loadAccounts(userId: userId)
+                transactionAccountId = response.account.id
+            }
+        }.resume()
+    }
+
     private func refreshTransactionsForCurrentPeriod() {
         guard let user = user else { return }
         let start = startOfDayUTC(transactionPeriodStart)
@@ -387,6 +472,14 @@ struct ContentView: View {
             transactionMessage = "Выберите категорию"
             return
         }
+        guard !accounts.isEmpty else {
+            transactionMessage = "Добавьте счёт"
+            return
+        }
+        guard let account = accounts.first(where: { $0.id == transactionAccountId }) else {
+            transactionMessage = "Выберите счёт"
+            return
+        }
         guard let amount = Int64(transactionAmount) else {
             transactionMessage = "Сумма должна быть целым числом"
             return
@@ -404,10 +497,11 @@ struct ContentView: View {
 
         let payload = TransactionRequest(
             userId: user.id,
+            accountId: account.id,
             categoryId: categoryId,
             type: transactionType.rawValue,
             amountMinor: amount,
-            currency: user.currencyDefault,
+            currency: account.currency,
             comment: transactionComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : transactionComment,
             occurredAt: isoFormatter.string(from: transactionDate)
         )
@@ -445,6 +539,7 @@ struct ContentView: View {
                 transactionAmount = ""
                 transactionComment = ""
                 transactionMessage = "Операция сохранена"
+                loadAccounts(userId: user.id)
             }
         }.resume()
     }
@@ -461,6 +556,75 @@ struct ContentView: View {
             return
         }
         transactionCategoryId = activeIds.first ?? ""
+    }
+
+    private func ensureTransactionAccountSelection() {
+        if !transactionAccountId.isEmpty, accounts.contains(where: { $0.id == transactionAccountId }) {
+            return
+        }
+        transactionAccountId = accounts.first?.id ?? ""
+    }
+
+    @ViewBuilder
+    private func accountsSection(userId: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Счета и кошельки")
+                .font(.headline)
+            if accounts.isEmpty {
+                Text("Создайте первый счёт, чтобы учитывать наличные, карты и вклады.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            } else {
+                ForEach(accounts) { account in
+                    Button(action: {
+                        transactionAccountId = account.id
+                    }) {
+                        accountRow(account: account)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Divider()
+
+            Text("Новый счёт")
+                .font(.subheadline)
+
+            TextField("Название", text: $accountNameInput)
+                .textFieldStyle(.roundedBorder)
+
+            Picker("Тип", selection: $accountTypeSelection) {
+                ForEach(AccountKind.allCases, id: \.self) { kind in
+                    Text(kind.localizedTitle).tag(kind)
+                }
+            }
+
+            TextField("Валюта", text: $accountCurrencyInput)
+                .textFieldStyle(.roundedBorder)
+                .textInputAutocapitalization(.characters)
+
+            TextField("Начальный баланс (в минорных единицах)", text: $accountInitialAmount)
+                .textFieldStyle(.roundedBorder)
+                .keyboardType(.numberPad)
+
+            Button(action: { saveAccount(for: userId) }) {
+                if isSavingAccount {
+                    ProgressView()
+                }
+                Text("Добавить счёт")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isSavingAccount || accountNameInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+            if !accountMessage.isEmpty {
+                Text(accountMessage)
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .cornerRadius(12)
     }
 
     @ViewBuilder
@@ -622,6 +786,17 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Новая операция")
                 .font(.headline)
+            if accounts.isEmpty {
+                Text("Добавьте счёт, чтобы фиксировать операции")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            } else {
+                Picker("Счёт", selection: $transactionAccountId) {
+                    ForEach(accounts) { account in
+                        Text("\(account.name) · \(account.currency)").tag(account.id)
+                    }
+                }
+            }
             Picker("Тип", selection: $transactionType) {
                 ForEach(TransactionKind.allCases, id: \.self) { kind in
                     Text(kind.localizedTitle).tag(kind)
@@ -661,7 +836,7 @@ struct ContentView: View {
                 Text("Сохранить операцию")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(isSavingTransaction || activeCategories.isEmpty)
+            .disabled(isSavingTransaction || activeCategories.isEmpty || accounts.isEmpty)
 
             if !transactionMessage.isEmpty {
                 Text(transactionMessage)
@@ -693,8 +868,38 @@ struct ContentView: View {
         }
     }
 
+    private func accountRow(account: Account) -> some View {
+        let amount = Double(account.balanceMinor) / 100.0
+        let formatted = String(format: "%.2f %@", abs(amount), account.currency)
+        let isSelected = account.id == transactionAccountId
+
+        return HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(account.name)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                Text(account.localizedType)
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                if isSelected {
+                    Label("Используется для операций", systemImage: "checkmark.circle.fill")
+                        .font(.footnote)
+                        .foregroundColor(.blue)
+                }
+            }
+            Spacer()
+            Text("\(amount >= 0 ? "+" : "-")\(formatted)")
+                .fontWeight(.semibold)
+                .foregroundColor(amount >= 0 ? .green : .red)
+        }
+        .padding(12)
+        .background(Color(uiColor: .secondarySystemBackground))
+        .cornerRadius(10)
+    }
+
     private func transactionRow(transaction: Transaction) -> some View {
         let categoryName = categories.first(where: { $0.id == transaction.categoryId })?.name ?? "Категория"
+        let accountName = accounts.first(where: { $0.id == transaction.accountId })?.name ?? "Счёт"
         let amount = Double(transaction.amountMinor) / 100.0
         let amountText = String(format: "%@%.2f %@", transaction.type.symbol, abs(amount), transaction.currency)
         let comment = transaction.comment?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -710,6 +915,9 @@ struct ContentView: View {
                     .foregroundColor(transaction.type.tint)
             }
             Text(displayFormatter.string(from: transaction.occurredAt))
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Text("Счёт: \(accountName)")
                 .font(.caption)
                 .foregroundColor(.secondary)
             if let comment, !comment.isEmpty {
@@ -755,6 +963,7 @@ private struct RegisterRequest: Codable {
 private struct RegisterResponse: Codable {
     let user: User
     let family: Family
+    let accounts: [Account]
 }
 
 private struct User: Codable {
@@ -787,6 +996,10 @@ private struct Family: Codable {
         case name
         case currencyBase = "currency_base"
     }
+}
+
+private struct AccountList: Codable {
+    let accounts: [Account]
 }
 
 private struct CategoryList: Codable {
@@ -829,6 +1042,40 @@ private struct Category: Codable, Identifiable {
     }
 }
 
+private struct Account: Codable, Identifiable {
+    let id: String
+    let familyId: String
+    let name: String
+    let type: String
+    let currency: String
+    let balanceMinor: Int64
+    let isArchived: Bool
+    let createdAt: String
+    let updatedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case familyId = "family_id"
+        case name
+        case type
+        case currency
+        case balanceMinor = "balance_minor"
+        case isArchived = "is_archived"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+
+    var localizedType: String {
+        switch type {
+        case "card": return "Карта"
+        case "bank": return "Банковский счёт"
+        case "deposit": return "Вклад"
+        case "wallet": return "Электронный кошелёк"
+        default: return "Наличные"
+        }
+    }
+}
+
 private struct CategoryPayload: Codable {
     let name: String
     let type: String
@@ -842,12 +1089,28 @@ private struct CategoryPayload: Codable {
     }
 }
 
+private struct AccountPayload: Codable {
+    let name: String
+    let type: String
+    let currency: String?
+    let initialBalanceMinor: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case name, type, currency
+        case initialBalanceMinor = "initial_balance_minor"
+    }
+}
+
 private struct CategoryResponse: Codable {
     let category: Category
 }
 
 private struct CategoryArchiveRequest: Codable {
     let archived: Bool
+}
+
+private struct AccountResponse: Codable {
+    let account: Account
 }
 
 private enum CategoryType: String, CaseIterable {
@@ -860,6 +1123,24 @@ private enum CategoryType: String, CaseIterable {
         case .income: return "Доход"
         case .expense: return "Расход"
         case .transfer: return "Перевод"
+        }
+    }
+}
+
+private enum AccountKind: String, CaseIterable {
+    case cash
+    case card
+    case bank
+    case deposit
+    case wallet
+
+    var localizedTitle: String {
+        switch self {
+        case .cash: return "Наличные"
+        case .card: return "Карта"
+        case .bank: return "Банковский счёт"
+        case .deposit: return "Вклад"
+        case .wallet: return "Электронный кошелёк"
         }
     }
 }
@@ -898,6 +1179,7 @@ private struct Transaction: Decodable, Identifiable {
     let id: String
     let familyId: String
     let userId: String
+    let accountId: String
     let categoryId: String
     let type: TransactionKind
     let amountMinor: Int64
@@ -911,6 +1193,7 @@ private struct Transaction: Decodable, Identifiable {
         case id
         case familyId = "family_id"
         case userId = "user_id"
+        case accountId = "account_id"
         case categoryId = "category_id"
         case type
         case amountMinor = "amount_minor"
@@ -926,6 +1209,7 @@ private struct Transaction: Decodable, Identifiable {
         id = try container.decode(String.self, forKey: .id)
         familyId = try container.decode(String.self, forKey: .familyId)
         userId = try container.decode(String.self, forKey: .userId)
+        accountId = try container.decode(String.self, forKey: .accountId)
         categoryId = try container.decode(String.self, forKey: .categoryId)
         type = try container.decode(TransactionKind.self, forKey: .type)
         amountMinor = try container.decode(Int64.self, forKey: .amountMinor)
@@ -948,6 +1232,7 @@ private struct Transaction: Decodable, Identifiable {
 
 private struct TransactionRequest: Encodable {
     let userId: String
+    let accountId: String
     let categoryId: String
     let type: String
     let amountMinor: Int64
@@ -957,6 +1242,7 @@ private struct TransactionRequest: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case userId = "user_id"
+        case accountId = "account_id"
         case categoryId = "category_id"
         case type
         case amountMinor = "amount_minor"

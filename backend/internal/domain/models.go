@@ -21,6 +21,18 @@ type User struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
+type Account struct {
+	ID           string    `json:"id"`
+	FamilyID     string    `json:"family_id"`
+	Name         string    `json:"name"`
+	Type         string    `json:"type"`
+	Currency     string    `json:"currency"`
+	BalanceMinor int64     `json:"balance_minor"`
+	IsArchived   bool      `json:"is_archived"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 type Category struct {
 	ID          string    `json:"id"`
 	FamilyID    string    `json:"family_id"`
@@ -39,6 +51,7 @@ type Transaction struct {
 	ID          string    `json:"id"`
 	FamilyID    string    `json:"family_id"`
 	UserID      string    `json:"user_id"`
+	AccountID   string    `json:"account_id"`
 	CategoryID  string    `json:"category_id"`
 	Type        string    `json:"type"`
 	AmountMinor int64     `json:"amount_minor"`
