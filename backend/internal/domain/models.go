@@ -22,13 +22,17 @@ type User struct {
 }
 
 type Category struct {
-	ID        string    `json:"id"`
-	FamilyID  string    `json:"family_id"`
-	Name      string    `json:"name"`
-	Type      string    `json:"type"`
-	Color     string    `json:"color"`
-	IsSystem  bool      `json:"is_system"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          string    `json:"id"`
+	FamilyID    string    `json:"family_id"`
+	ParentID    *string   `json:"parent_id,omitempty"`
+	Name        string    `json:"name"`
+	Type        string    `json:"type"`
+	Color       string    `json:"color"`
+	IsSystem    bool      `json:"is_system"`
+	Description string    `json:"description"`
+	IsArchived  bool      `json:"is_archived"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type Transaction struct {

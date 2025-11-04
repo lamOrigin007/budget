@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -66,13 +67,13 @@ func (s *Store) GetUser(ctx context.Context, id string) (*domain.User, error) {
 }
 
 func (s *Store) CreateCategory(ctx context.Context, category *domain.Category) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO categories (id, family_id, name, type, color, is_system, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		category.ID, category.FamilyID, category.Name, category.Type, category.Color, category.IsSystem, category.CreatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO categories (id, family_id, parent_id, name, type, color, description, is_system, is_archived, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		category.ID, category.FamilyID, category.ParentID, category.Name, category.Type, category.Color, nullableString(category.Description), category.IsSystem, category.IsArchived, category.CreatedAt, category.UpdatedAt)
 	return err
 }
 
 func (s *Store) ListCategoriesByFamily(ctx context.Context, familyID string) ([]domain.Category, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, family_id, name, type, color, is_system, created_at FROM categories WHERE family_id = ? ORDER BY name`, familyID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, family_id, parent_id, name, type, color, description, is_system, is_archived, created_at, updated_at FROM categories WHERE family_id = ? ORDER BY is_archived, name`, familyID)
 	if err != nil {
 		return nil, err
 	}
@@ -81,28 +82,86 @@ func (s *Store) ListCategoriesByFamily(ctx context.Context, familyID string) ([]
 	var categories []domain.Category
 	for rows.Next() {
 		var category domain.Category
-		var isSystem int
-		if err := rows.Scan(&category.ID, &category.FamilyID, &category.Name, &category.Type, &category.Color, &isSystem, &category.CreatedAt); err != nil {
+		var parentID sql.NullString
+		var description sql.NullString
+		var isSystem bool
+		var isArchived bool
+		if err := rows.Scan(&category.ID, &category.FamilyID, &parentID, &category.Name, &category.Type, &category.Color, &description, &isSystem, &isArchived, &category.CreatedAt, &category.UpdatedAt); err != nil {
 			return nil, err
 		}
-		category.IsSystem = isSystem == 1
+		if parentID.Valid {
+			category.ParentID = &parentID.String
+		}
+		if description.Valid {
+			category.Description = description.String
+		}
+		category.IsSystem = isSystem
+		category.IsArchived = isArchived
 		categories = append(categories, category)
 	}
 	return categories, rows.Err()
 }
 
 func (s *Store) GetCategory(ctx context.Context, id string) (*domain.Category, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, family_id, name, type, color, is_system, created_at FROM categories WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, family_id, parent_id, name, type, color, description, is_system, is_archived, created_at, updated_at FROM categories WHERE id = ?`, id)
 	var category domain.Category
-	var isSystem int
-	if err := row.Scan(&category.ID, &category.FamilyID, &category.Name, &category.Type, &category.Color, &isSystem, &category.CreatedAt); err != nil {
+	var parentID sql.NullString
+	var description sql.NullString
+	var isSystem bool
+	var isArchived bool
+	if err := row.Scan(&category.ID, &category.FamilyID, &parentID, &category.Name, &category.Type, &category.Color, &description, &isSystem, &isArchived, &category.CreatedAt, &category.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	category.IsSystem = isSystem == 1
+	if parentID.Valid {
+		category.ParentID = &parentID.String
+	}
+	if description.Valid {
+		category.Description = description.String
+	}
+	category.IsSystem = isSystem
+	category.IsArchived = isArchived
 	return &category, nil
+}
+
+func (s *Store) UpdateCategory(ctx context.Context, category *domain.Category) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE categories SET parent_id = ?, name = ?, type = ?, color = ?, description = ?, updated_at = ? WHERE id = ? AND family_id = ?`,
+		category.ParentID, category.Name, category.Type, category.Color, nullableString(category.Description), category.UpdatedAt, category.ID, category.FamilyID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) SetCategoryArchived(ctx context.Context, id, familyID string, archived bool, updatedAt time.Time) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE categories SET is_archived = ?, updated_at = ? WHERE id = ? AND family_id = ?`, archived, updatedAt, id, familyID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func nullableString(value string) interface{} {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
 }
 
 func (s *Store) CreateTransaction(ctx context.Context, txn *domain.Transaction) error {

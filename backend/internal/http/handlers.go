@@ -2,6 +2,8 @@ package http
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -18,6 +20,11 @@ type Handlers struct {
 	store *store.Store
 }
 
+var (
+	errParentNotFound = errors.New("parent category not found")
+	errParentArchived = errors.New("parent category is archived")
+)
+
 type RegisterRequest struct {
 	Email      string `json:"email"`
 	Password   string `json:"password"`
@@ -31,6 +38,22 @@ type RegisterResponse struct {
 	User       domain.User       `json:"user"`
 	Family     domain.Family     `json:"family"`
 	Categories []domain.Category `json:"categories"`
+}
+
+type CategoryRequest struct {
+	Name        string  `json:"name"`
+	Type        string  `json:"type"`
+	Color       string  `json:"color"`
+	Description string  `json:"description"`
+	ParentID    *string `json:"parent_id"`
+}
+
+type archiveCategoryRequest struct {
+	Archived bool `json:"archived"`
+}
+
+type categoryResponse struct {
+	Category domain.Category `json:"category"`
 }
 
 type TransactionRequest struct {
@@ -151,6 +174,166 @@ func (h *Handlers) ListCategories(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{"categories": categories})
 }
 
+func (h *Handlers) CreateCategory(c echo.Context) error {
+	userID := c.Param("id")
+	user, err := h.store.GetUser(c.Request().Context(), userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+	}
+
+	var req CategoryRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+	}
+	normalizeParent(&req)
+	if err := validateCategoryPayload(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+
+	now := time.Now().UTC()
+	category := &domain.Category{
+		ID:          uuid.NewString(),
+		FamilyID:    user.FamilyID,
+		ParentID:    req.ParentID,
+		Name:        strings.TrimSpace(req.Name),
+		Type:        strings.ToLower(strings.TrimSpace(req.Type)),
+		Color:       normalizeHexColor(req.Color),
+		Description: strings.TrimSpace(req.Description),
+		IsSystem:    false,
+		IsArchived:  false,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	if category.ParentID != nil {
+		if err := h.ensureParentCategory(c.Request().Context(), user.FamilyID, *category.ParentID); err != nil {
+			if errors.Is(err, errParentNotFound) {
+				return c.JSON(http.StatusBadRequest, map[string]string{"error": "parent category not found"})
+			}
+			if errors.Is(err, errParentArchived) {
+				return c.JSON(http.StatusBadRequest, map[string]string{"error": "parent category is archived"})
+			}
+			return err
+		}
+	}
+
+	if err := h.store.CreateCategory(c.Request().Context(), category); err != nil {
+		return err
+	}
+	return c.JSON(http.StatusCreated, categoryResponse{Category: *category})
+}
+
+func (h *Handlers) UpdateCategory(c echo.Context) error {
+	userID := c.Param("id")
+	categoryID := c.Param("categoryId")
+
+	user, err := h.store.GetUser(c.Request().Context(), userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+	}
+
+	category, err := h.store.GetCategory(c.Request().Context(), categoryID)
+	if err != nil {
+		return err
+	}
+	if category == nil || category.FamilyID != user.FamilyID {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "category not found"})
+	}
+
+	var req CategoryRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+	}
+	normalizeParent(&req)
+	if err := validateCategoryPayload(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+
+	if req.ParentID != nil {
+		if err := h.ensureParentCategory(c.Request().Context(), user.FamilyID, *req.ParentID); err != nil {
+			if errors.Is(err, errParentNotFound) {
+				return c.JSON(http.StatusBadRequest, map[string]string{"error": "parent category not found"})
+			}
+			if errors.Is(err, errParentArchived) {
+				return c.JSON(http.StatusBadRequest, map[string]string{"error": "parent category is archived"})
+			}
+			return err
+		}
+	}
+
+	category.Name = strings.TrimSpace(req.Name)
+	category.Type = strings.ToLower(strings.TrimSpace(req.Type))
+	category.Color = normalizeHexColor(req.Color)
+	category.Description = strings.TrimSpace(req.Description)
+	category.ParentID = req.ParentID
+	category.UpdatedAt = time.Now().UTC()
+
+	if err := h.store.UpdateCategory(c.Request().Context(), category); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "category not found"})
+		}
+		return err
+	}
+
+	updated, err := h.store.GetCategory(c.Request().Context(), categoryID)
+	if err != nil {
+		return err
+	}
+	if updated == nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "category not found after update"})
+	}
+	return c.JSON(http.StatusOK, categoryResponse{Category: *updated})
+}
+
+func (h *Handlers) ToggleCategoryArchive(c echo.Context) error {
+	userID := c.Param("id")
+	categoryID := c.Param("categoryId")
+
+	user, err := h.store.GetUser(c.Request().Context(), userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+	}
+
+	category, err := h.store.GetCategory(c.Request().Context(), categoryID)
+	if err != nil {
+		return err
+	}
+	if category == nil || category.FamilyID != user.FamilyID {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "category not found"})
+	}
+
+	var req archiveCategoryRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+	}
+
+	if err := h.store.SetCategoryArchived(c.Request().Context(), categoryID, user.FamilyID, req.Archived, time.Now().UTC()); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "category not found"})
+		}
+		return err
+	}
+
+	updated, err := h.store.GetCategory(c.Request().Context(), categoryID)
+	if err != nil {
+		return err
+	}
+	if updated == nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "category not found after update"})
+	}
+
+	return c.JSON(http.StatusOK, categoryResponse{Category: *updated})
+}
+
 func (h *Handlers) CreateTransaction(c echo.Context) error {
 	var req TransactionRequest
 	if err := c.Bind(&req); err != nil {
@@ -177,6 +360,9 @@ func (h *Handlers) CreateTransaction(c echo.Context) error {
 	}
 	if category == nil || category.FamilyID != user.FamilyID {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "category not found"})
+	}
+	if category.IsArchived {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "category is archived"})
 	}
 
 	occurredAt, err := time.Parse(time.RFC3339, req.OccurredAt)
@@ -225,11 +411,11 @@ func (h *Handlers) ListTransactions(c echo.Context) error {
 
 func (h *Handlers) bootstrapCategories(ctx context.Context, familyID string) error {
 	defaults := []domain.Category{
-		{Name: "Зарплата", Type: "income", Color: "#22c55e"},
-		{Name: "Подработка", Type: "income", Color: "#16a34a"},
-		{Name: "Продукты", Type: "expense", Color: "#ef4444"},
-		{Name: "Транспорт", Type: "expense", Color: "#f97316"},
-		{Name: "Досуг", Type: "expense", Color: "#6366f1"},
+		{Name: "Базовый доход семьи", Type: "income", Color: "#22c55e", Description: "Регулярные поступления (зарплаты, стипендии)"},
+		{Name: "Дополнительный доход", Type: "income", Color: "#16a34a", Description: "Подработка, подарки, возврат долгов"},
+		{Name: "Продуктовая корзина", Type: "expense", Color: "#ef4444", Description: "Ежедневные траты на питание семьи"},
+		{Name: "Транспорт и перемещения", Type: "expense", Color: "#f97316", Description: "Проездные, такси, обслуживание авто"},
+		{Name: "Досуг и семейные активности", Type: "expense", Color: "#6366f1", Description: "Развлечения, путешествия, мероприятия"},
 	}
 
 	existing, err := h.store.ListCategoriesByFamily(ctx, familyID)
@@ -247,9 +433,70 @@ func (h *Handlers) bootstrapCategories(ctx context.Context, familyID string) err
 		cat.FamilyID = familyID
 		cat.IsSystem = true
 		cat.CreatedAt = now
+		cat.UpdatedAt = now
 		if err := h.store.CreateCategory(ctx, &cat); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func validateCategoryPayload(req *CategoryRequest) error {
+	if strings.TrimSpace(req.Name) == "" {
+		return errors.New("name is required")
+	}
+	switch strings.ToLower(strings.TrimSpace(req.Type)) {
+	case "income", "expense", "transfer":
+	default:
+		return errors.New("type must be income, expense or transfer")
+	}
+	if strings.TrimSpace(req.Color) == "" {
+		return errors.New("color is required")
+	}
+	return nil
+}
+
+func normalizeParent(req *CategoryRequest) {
+	if req.ParentID == nil {
+		return
+	}
+	trimmed := strings.TrimSpace(*req.ParentID)
+	if trimmed == "" {
+		req.ParentID = nil
+		return
+	}
+	parentID := trimmed
+	req.ParentID = &parentID
+}
+
+func (h *Handlers) ensureParentCategory(ctx context.Context, familyID, parentID string) error {
+	parent, err := h.store.GetCategory(ctx, parentID)
+	if err != nil {
+		return err
+	}
+	if parent == nil || parent.FamilyID != familyID {
+		return errParentNotFound
+	}
+	if parent.IsArchived {
+		return errParentArchived
+	}
+	return nil
+}
+
+func normalizeHexColor(color string) string {
+	normalized := strings.TrimSpace(color)
+	if normalized == "" {
+		return "#0ea5e9"
+	}
+	if !strings.HasPrefix(normalized, "#") {
+		normalized = "#" + normalized
+	}
+	if len(normalized) == 4 {
+		// expand short hex like #abc to #aabbcc
+		r := normalized[1:2]
+		g := normalized[2:3]
+		b := normalized[3:4]
+		normalized = "#" + r + r + g + g + b + b
+	}
+	return strings.ToLower(normalized)
 }

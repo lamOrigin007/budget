@@ -28,11 +28,28 @@ export interface Family {
 
 export interface Category {
   id: string;
+  family_id: string;
+  parent_id?: string | null;
   name: string;
-  type: 'income' | 'expense';
+  type: 'income' | 'expense' | 'transfer';
   color: string;
+  description?: string;
   is_system: boolean;
+  is_archived: boolean;
   created_at: string;
+  updated_at: string;
+}
+
+export interface CategoryPayload {
+  name: string;
+  type: 'income' | 'expense' | 'transfer';
+  color: string;
+  description?: string;
+  parent_id?: string | null;
+}
+
+export interface CategoryArchivePayload {
+  archived: boolean;
 }
 
 export interface Transaction {
@@ -94,6 +111,34 @@ export async function registerUser(payload: RegisterRequest): Promise<RegisterRe
 export async function fetchCategories(userId: string): Promise<Category[]> {
   const data = await request<{ categories: Category[] }>(`/api/v1/users/${userId}/categories`);
   return data.categories;
+}
+
+export async function createCategory(userId: string, payload: CategoryPayload): Promise<Category> {
+  const data = await request<{ category: Category }>(`/api/v1/users/${userId}/categories`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+  return data.category;
+}
+
+export async function updateCategory(userId: string, categoryId: string, payload: CategoryPayload): Promise<Category> {
+  const data = await request<{ category: Category }>(`/api/v1/users/${userId}/categories/${categoryId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload)
+  });
+  return data.category;
+}
+
+export async function setCategoryArchived(
+  userId: string,
+  categoryId: string,
+  payload: CategoryArchivePayload
+): Promise<Category> {
+  const data = await request<{ category: Category }>(`/api/v1/users/${userId}/categories/${categoryId}/archive`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+  return data.category;
 }
 
 export async function createTransaction(payload: TransactionRequest): Promise<Transaction> {
