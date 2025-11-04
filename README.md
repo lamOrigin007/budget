@@ -183,6 +183,18 @@
    go run ./cmd/api
    ```
 
+5. **Запуск веб-клиента**
+   ```bash
+   cd web
+   npm install
+   npm run dev
+   ```
+   В браузере приложение будет доступно по адресу `http://localhost:3000`. Бекенд ожидается на `http://localhost:8080` (можно переопределить через переменную окружения `NEXT_PUBLIC_API_BASE`).
+
+6. **Мобильные клиенты**
+   - **Android**: открыть проект в Android Studio (`mobile/android`), синхронизировать Gradle и запустить `app` на эмуляторе. Используется Compose UI, запросы отправляются на `http://10.0.2.2:8080` (эмулятор Android).
+   - **iOS**: открыть `mobile/ios/FamilyBudget` в Xcode, выбрать симулятор и запустить. Клиент обращается к API на `http://localhost:8080`.
+
 ---
 
 ## Разработка

@@ -1,0 +1,2 @@
+rootProject.name = "FamilyBudget"
+include(":app")
