@@ -40,6 +40,18 @@ export interface Category {
   updated_at: string;
 }
 
+export interface Account {
+  id: string;
+  family_id: string;
+  name: string;
+  type: 'cash' | 'card' | 'bank' | 'deposit' | 'wallet';
+  currency: string;
+  balance_minor: number;
+  is_archived: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface CategoryPayload {
   name: string;
   type: 'income' | 'expense' | 'transfer';
@@ -56,6 +68,7 @@ export interface Transaction {
   id: string;
   user_id: string;
   family_id: string;
+  account_id: string;
   category_id: string;
   type: 'income' | 'expense';
   amount_minor: number;
@@ -70,16 +83,25 @@ export interface RegisterResponse {
   user: User;
   family: Family;
   categories: Category[];
+  accounts: Account[];
 }
 
 export interface TransactionRequest {
   user_id: string;
+  account_id: string;
   category_id: string;
   type: 'income' | 'expense';
   amount_minor: number;
   currency: string;
   comment?: string;
   occurred_at: string;
+}
+
+export interface AccountPayload {
+  name: string;
+  type: 'cash' | 'card' | 'bank' | 'deposit' | 'wallet';
+  currency?: string;
+  initial_balance_minor?: number;
 }
 
 export interface TransactionFilters {
@@ -124,6 +146,19 @@ export async function createCategory(userId: string, payload: CategoryPayload): 
     body: JSON.stringify(payload)
   });
   return data.category;
+}
+
+export async function fetchAccounts(userId: string): Promise<Account[]> {
+  const data = await request<{ accounts: Account[] }>(`/api/v1/users/${userId}/accounts`);
+  return data.accounts;
+}
+
+export async function createAccount(userId: string, payload: AccountPayload): Promise<Account> {
+  const data = await request<{ account: Account }>(`/api/v1/users/${userId}/accounts`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+  return data.account;
 }
 
 export async function updateCategory(userId: string, categoryId: string, payload: CategoryPayload): Promise<Category> {

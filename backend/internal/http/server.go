@@ -40,6 +40,8 @@ func RegisterRoutes(e *echo.Echo, handlers *Handlers) {
 	api.POST("/users/:id/categories", handlers.CreateCategory)
 	api.PUT("/users/:id/categories/:categoryId", handlers.UpdateCategory)
 	api.POST("/users/:id/categories/:categoryId/archive", handlers.ToggleCategoryArchive)
+	api.GET("/users/:id/accounts", handlers.ListAccounts)
+	api.POST("/users/:id/accounts", handlers.CreateAccount)
 	api.POST("/transactions", handlers.CreateTransaction)
 	api.GET("/users/:id/transactions", handlers.ListTransactions)
 }

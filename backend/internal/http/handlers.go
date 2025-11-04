@@ -38,6 +38,7 @@ type RegisterResponse struct {
 	User       domain.User       `json:"user"`
 	Family     domain.Family     `json:"family"`
 	Categories []domain.Category `json:"categories"`
+	Accounts   []domain.Account  `json:"accounts"`
 }
 
 type CategoryRequest struct {
@@ -58,6 +59,7 @@ type categoryResponse struct {
 
 type TransactionRequest struct {
 	UserID      string `json:"user_id"`
+	AccountID   string `json:"account_id"`
 	CategoryID  string `json:"category_id"`
 	Type        string `json:"type"`
 	AmountMinor int64  `json:"amount_minor"`
@@ -68,6 +70,17 @@ type TransactionRequest struct {
 
 type transactionResponse struct {
 	Transaction domain.Transaction `json:"transaction"`
+}
+
+type AccountRequest struct {
+	Name                string `json:"name"`
+	Type                string `json:"type"`
+	Currency            string `json:"currency"`
+	InitialBalanceMinor int64  `json:"initial_balance_minor"`
+}
+
+type accountResponse struct {
+	Account domain.Account `json:"account"`
 }
 
 func NewHandlers(store *store.Store) *Handlers {
@@ -124,12 +137,21 @@ func (h *Handlers) RegisterUser(c echo.Context) error {
 		return err
 	}
 
+	if err := h.bootstrapAccounts(c.Request().Context(), family.ID, strings.ToUpper(req.Currency)); err != nil {
+		return err
+	}
+
 	categories, err := h.store.ListCategoriesByFamily(c.Request().Context(), family.ID)
 	if err != nil {
 		return err
 	}
 
-	return c.JSON(http.StatusCreated, RegisterResponse{User: *user, Family: *family, Categories: categories})
+	accounts, err := h.store.ListAccountsByFamily(c.Request().Context(), family.ID)
+	if err != nil {
+		return err
+	}
+
+	return c.JSON(http.StatusCreated, RegisterResponse{User: *user, Family: *family, Categories: categories, Accounts: accounts})
 }
 
 func defaultLocale(locale string) string {
@@ -172,6 +194,22 @@ func (h *Handlers) ListCategories(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{"categories": categories})
+}
+
+func (h *Handlers) ListAccounts(c echo.Context) error {
+	userID := c.Param("id")
+	user, err := h.store.GetUser(c.Request().Context(), userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+	}
+	accounts, err := h.store.ListAccountsByFamily(c.Request().Context(), user.FamilyID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{"accounts": accounts})
 }
 
 func (h *Handlers) CreateCategory(c echo.Context) error {
@@ -224,6 +262,46 @@ func (h *Handlers) CreateCategory(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusCreated, categoryResponse{Category: *category})
+}
+
+func (h *Handlers) CreateAccount(c echo.Context) error {
+	userID := c.Param("id")
+	user, err := h.store.GetUser(c.Request().Context(), userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+	}
+
+	var req AccountRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+	}
+
+	sanitizeAccountRequest(&req, user.CurrencyDefault)
+	if err := validateAccountPayload(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+
+	now := time.Now().UTC()
+	account := &domain.Account{
+		ID:           uuid.NewString(),
+		FamilyID:     user.FamilyID,
+		Name:         req.Name,
+		Type:         req.Type,
+		Currency:     req.Currency,
+		BalanceMinor: req.InitialBalanceMinor,
+		IsArchived:   false,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+
+	if err := h.store.CreateAccount(c.Request().Context(), account); err != nil {
+		return err
+	}
+
+	return c.JSON(http.StatusCreated, accountResponse{Account: *account})
 }
 
 func (h *Handlers) UpdateCategory(c echo.Context) error {
@@ -339,7 +417,7 @@ func (h *Handlers) CreateTransaction(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 	}
-	if req.UserID == "" || req.CategoryID == "" || req.Type == "" || req.AmountMinor == 0 || req.Currency == "" || req.OccurredAt == "" {
+	if req.UserID == "" || req.AccountID == "" || req.CategoryID == "" || req.Type == "" || req.AmountMinor == 0 || req.OccurredAt == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "missing required fields"})
 	}
 	if req.Type != "income" && req.Type != "expense" {
@@ -365,6 +443,25 @@ func (h *Handlers) CreateTransaction(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "category is archived"})
 	}
 
+	account, err := h.store.GetAccount(c.Request().Context(), req.AccountID)
+	if err != nil {
+		return err
+	}
+	if account == nil || account.FamilyID != user.FamilyID {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "account not found"})
+	}
+	if account.IsArchived {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "account is archived"})
+	}
+
+	currency := strings.ToUpper(strings.TrimSpace(req.Currency))
+	if currency == "" {
+		currency = account.Currency
+	}
+	if currency != account.Currency {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "currency must match account currency"})
+	}
+
 	occurredAt, err := time.Parse(time.RFC3339, req.OccurredAt)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "occurred_at must be RFC3339"})
@@ -375,10 +472,11 @@ func (h *Handlers) CreateTransaction(c echo.Context) error {
 		ID:          uuid.NewString(),
 		FamilyID:    user.FamilyID,
 		UserID:      user.ID,
+		AccountID:   account.ID,
 		CategoryID:  category.ID,
 		Type:        req.Type,
 		AmountMinor: req.AmountMinor,
-		Currency:    strings.ToUpper(req.Currency),
+		Currency:    currency,
 		Comment:     strings.TrimSpace(req.Comment),
 		OccurredAt:  occurredAt.UTC(),
 		CreatedAt:   now,
@@ -386,6 +484,12 @@ func (h *Handlers) CreateTransaction(c echo.Context) error {
 	}
 
 	if err := h.store.CreateTransaction(c.Request().Context(), txn); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "account not found"})
+		}
+		if errors.Is(err, store.ErrAccountArchived) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "account is archived"})
+		}
 		return err
 	}
 
@@ -465,6 +569,43 @@ func (h *Handlers) bootstrapCategories(ctx context.Context, familyID string) err
 	return nil
 }
 
+func (h *Handlers) bootstrapAccounts(ctx context.Context, familyID, currency string) error {
+	existing, err := h.store.ListAccountsByFamily(ctx, familyID)
+	if err != nil {
+		return err
+	}
+	if len(existing) > 0 {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	defaults := []struct {
+		name    string
+		accType string
+	}{
+		{name: "Наличные", accType: "cash"},
+		{name: "Основная карта", accType: "card"},
+	}
+
+	for _, base := range defaults {
+		account := &domain.Account{
+			ID:           uuid.NewString(),
+			FamilyID:     familyID,
+			Name:         base.name,
+			Type:         base.accType,
+			Currency:     currency,
+			BalanceMinor: 0,
+			IsArchived:   false,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		if err := h.store.CreateAccount(ctx, account); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func validateCategoryPayload(req *CategoryRequest) error {
 	if strings.TrimSpace(req.Name) == "" {
 		return errors.New("name is required")
@@ -523,4 +664,43 @@ func normalizeHexColor(color string) string {
 		normalized = "#" + r + r + g + g + b + b
 	}
 	return strings.ToLower(normalized)
+}
+
+var allowedAccountTypes = map[string]struct{}{
+	"cash":    {},
+	"card":    {},
+	"bank":    {},
+	"deposit": {},
+	"wallet":  {},
+}
+
+func sanitizeAccountRequest(req *AccountRequest, fallbackCurrency string) {
+	req.Name = strings.TrimSpace(req.Name)
+	req.Type = normalizeAccountType(req.Type)
+	currency := strings.TrimSpace(req.Currency)
+	if currency == "" {
+		currency = strings.TrimSpace(fallbackCurrency)
+	}
+	req.Currency = strings.ToUpper(currency)
+}
+
+func normalizeAccountType(value string) string {
+	t := strings.ToLower(strings.TrimSpace(value))
+	if _, ok := allowedAccountTypes[t]; ok {
+		return t
+	}
+	return "cash"
+}
+
+func validateAccountPayload(req *AccountRequest) error {
+	if req.Name == "" {
+		return errors.New("name is required")
+	}
+	if _, ok := allowedAccountTypes[req.Type]; !ok {
+		return errors.New("type must be one of cash, card, bank, deposit, wallet")
+	}
+	if strings.TrimSpace(req.Currency) == "" {
+		return errors.New("currency is required")
+	}
+	return nil
 }

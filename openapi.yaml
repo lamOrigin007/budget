@@ -174,6 +174,54 @@ paths:
           description: Validation error
         '404':
           description: Not found
+  /api/v1/users/{id}/accounts:
+    get:
+      summary: List accounts for user family
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Accounts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accounts:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Account'
+        '404':
+          description: Not found
+    post:
+      summary: Create an account in the user's family
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountRequest'
+      responses:
+        '201':
+          description: Created account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountResponse'
+        '400':
+          description: Validation error
+        '404':
+          description: User not found
   /api/v1/users/{id}/transactions:
     get:
       summary: List transactions for a user
@@ -263,6 +311,10 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Category'
+        accounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Account'
     User:
       type: object
       properties:
@@ -327,6 +379,52 @@ components:
         updated_at:
           type: string
           format: date-time
+    Account:
+      type: object
+      properties:
+        id:
+          type: string
+        family_id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+          enum: [cash, card, bank, deposit, wallet]
+        currency:
+          type: string
+        balance_minor:
+          type: integer
+          format: int64
+        is_archived:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AccountRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [cash, card, bank, deposit, wallet]
+        currency:
+          type: string
+        initial_balance_minor:
+          type: integer
+          format: int64
+      required:
+        - name
+        - type
+    AccountResponse:
+      type: object
+      properties:
+        account:
+          $ref: '#/components/schemas/Account'
     CategoryRequest:
       type: object
       required: [name, type, color]
@@ -363,6 +461,8 @@ components:
           type: string
         user_id:
           type: string
+        account_id:
+          type: string
         category_id:
           type: string
         type:
@@ -386,9 +486,11 @@ components:
           format: date-time
     TransactionRequest:
       type: object
-      required: [user_id, category_id, type, amount_minor, currency, occurred_at]
+      required: [user_id, account_id, category_id, type, amount_minor, currency, occurred_at]
       properties:
         user_id:
+          type: string
+        account_id:
           type: string
         category_id:
           type: string

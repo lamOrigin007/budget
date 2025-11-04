@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -79,6 +80,7 @@ fun BudgetScreen(client: HttpClient) {
     var user by remember { mutableStateOf<User?>(null) }
     var family by remember { mutableStateOf<Family?>(null) }
     var categories by remember { mutableStateOf(listOf<Category>()) }
+    var accounts by remember { mutableStateOf(listOf<Account>()) }
     var categoryName by remember { mutableStateOf("") }
     var categoryType by remember { mutableStateOf("expense") }
     var categoryColor by remember { mutableStateOf("#0EA5E9") }
@@ -87,6 +89,12 @@ fun BudgetScreen(client: HttpClient) {
     var editingCategoryId by remember { mutableStateOf<String?>(null) }
     var categoryMessage by remember { mutableStateOf("") }
     var isCategoryLoading by remember { mutableStateOf(false) }
+    var accountName by remember { mutableStateOf("") }
+    var accountType by remember { mutableStateOf("cash") }
+    var accountCurrency by remember { mutableStateOf("") }
+    var accountInitial by remember { mutableStateOf("") }
+    var accountMessage by remember { mutableStateOf("") }
+    var isAccountLoading by remember { mutableStateOf(false) }
 
     fun register() {
         CoroutineScope(Dispatchers.IO).launch {
@@ -107,8 +115,11 @@ fun BudgetScreen(client: HttpClient) {
                     user = response.user
                     family = response.family
                     status = "Профиль создан для ${'$'}{response.user.name}"
+                    accounts = response.accounts
+                    accountCurrency = response.user.currencyDefault
                 }
                 loadCategories(response.user.id)
+                loadAccounts(response.user.id)
             } catch (ex: Exception) {
                 withContext(Dispatchers.Main) {
                     status = "Ошибка: ${'$'}{ex.message}"
@@ -127,6 +138,21 @@ fun BudgetScreen(client: HttpClient) {
             } catch (ex: Exception) {
                 withContext(Dispatchers.Main) {
                     categoryMessage = "Не удалось загрузить категории: ${'$'}{ex.message}"
+                }
+            }
+        }
+    }
+
+    fun loadAccounts(userId: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val list: AccountList = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/accounts").body()
+                withContext(Dispatchers.Main) {
+                    accounts = list.accounts.sortedBy { it.name }
+                }
+            } catch (ex: Exception) {
+                withContext(Dispatchers.Main) {
+                    accountMessage = "Не удалось загрузить счета: ${'$'}{ex.message}"
                 }
             }
         }
@@ -182,6 +208,47 @@ fun BudgetScreen(client: HttpClient) {
             } finally {
                 withContext(Dispatchers.Main) {
                     isCategoryLoading = false
+                }
+            }
+        }
+    }
+
+    fun createAccount() {
+        val currentUser = user ?: return
+        if (accountName.isBlank()) {
+            accountMessage = "Укажите название счёта"
+            return
+        }
+        CoroutineScope(Dispatchers.IO).launch {
+            isAccountLoading = true
+            val initialMinor = accountInitial.toLongOrNull()
+            val trimmedCurrency = accountCurrency.trim().uppercase()
+            val payload = AccountPayload(
+                name = accountName.trim(),
+                type = accountType,
+                currency = if (trimmedCurrency.isBlank()) null else trimmedCurrency,
+                initialBalanceMinor = initialMinor
+            )
+            try {
+                val response: AccountResponse = client.post("http://10.0.2.2:8080/api/v1/users/${'$'}{currentUser.id}/accounts") {
+                    setBody(payload)
+                }.body()
+                withContext(Dispatchers.Main) {
+                    accounts = accounts.plus(response.account).sortedBy { it.name }
+                    accountName = ""
+                    accountInitial = ""
+                    accountCurrency = response.account.currency
+                    accountType = "cash"
+                    accountMessage = "Счёт создан"
+                }
+                loadAccounts(currentUser.id)
+            } catch (ex: Exception) {
+                withContext(Dispatchers.Main) {
+                    accountMessage = "Ошибка: ${'$'}{ex.message}"
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    isAccountLoading = false
                 }
             }
         }
@@ -295,6 +362,21 @@ fun BudgetScreen(client: HttpClient) {
                         categoryParentId = category.parentId
                     },
                     onArchive = { category, archived -> archiveCategory(category, archived) }
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                AccountsManager(
+                    accounts = accounts,
+                    accountName = accountName,
+                    accountType = accountType,
+                    accountCurrency = accountCurrency,
+                    accountInitial = accountInitial,
+                    message = accountMessage,
+                    isLoading = isAccountLoading,
+                    onNameChange = { accountName = it },
+                    onTypeChange = { accountType = it },
+                    onCurrencyChange = { accountCurrency = it.uppercase() },
+                    onInitialChange = { accountInitial = it },
+                    onCreate = { createAccount() }
                 )
             }
             Spacer(modifier = Modifier.height(12.dp))
@@ -463,6 +545,110 @@ private fun CategoryRow(
     }
 }
 
+@Composable
+private fun AccountsManager(
+    accounts: List<Account>,
+    accountName: String,
+    accountType: String,
+    accountCurrency: String,
+    accountInitial: String,
+    message: String,
+    isLoading: Boolean,
+    onNameChange: (String) -> Unit,
+    onTypeChange: (String) -> Unit,
+    onCurrencyChange: (String) -> Unit,
+    onInitialChange: (String) -> Unit,
+    onCreate: () -> Unit
+) {
+    val typeOptions = listOf(
+        "cash" to "Наличные",
+        "card" to "Карта",
+        "bank" to "Банковский счёт",
+        "deposit" to "Вклад",
+        "wallet" to "Электронный кошелёк"
+    )
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Счета и кошельки", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            if (accounts.isEmpty()) {
+                Text(
+                    text = "Создайте первый счёт, чтобы учитывать наличные, карты и вклады.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    accounts.forEach { account ->
+                        AccountRow(account = account)
+                    }
+                }
+            }
+
+            Divider()
+            Text("Новый счёт", style = MaterialTheme.typography.titleSmall)
+            OutlinedTextField(
+                value = accountName,
+                onValueChange = onNameChange,
+                label = { Text("Название") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                typeOptions.forEach { (value, label) ->
+                    OutlinedButton(onClick = { onTypeChange(value) }, enabled = accountType != value) {
+                        Text(label)
+                    }
+                }
+            }
+            OutlinedTextField(
+                value = accountCurrency,
+                onValueChange = onCurrencyChange,
+                label = { Text("Валюта") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = accountInitial,
+                onValueChange = onInitialChange,
+                label = { Text("Начальный баланс (в минорных единицах)") },
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = androidx.compose.ui.text.input.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number)
+            )
+            Button(onClick = onCreate, enabled = !isLoading && accountName.isNotBlank()) {
+                Text("Создать счёт")
+            }
+            if (message.isNotEmpty()) {
+                Text(text = message, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+@Composable
+private fun AccountRow(account: Account) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(text = account.name, fontWeight = FontWeight.SemiBold)
+            Text(
+                text = "Тип: " + when (account.type) {
+                    "card" -> "Карта"
+                    "bank" -> "Банковский счёт"
+                    "deposit" -> "Вклад"
+                    "wallet" -> "Электронный кошелёк"
+                    else -> "Наличные"
+                },
+                style = MaterialTheme.typography.bodySmall
+            )
+            val amount = account.balanceMinor / 100.0
+            Text(
+                text = String.format("Баланс: %.2f %s", amount, account.currency),
+                style = MaterialTheme.typography.bodySmall
+            )
+            if (account.isArchived) {
+                Text("Счёт в архиве", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+        }
+    }
+}
+
 @Serializable
 private data class RegisterRequest(
     val email: String,
@@ -476,7 +662,8 @@ private data class RegisterRequest(
 @Serializable
 private data class RegisterResponse(
     val user: User,
-    val family: Family
+    val family: Family,
+    val accounts: List<Account>
 )
 
 @Serializable
@@ -528,4 +715,35 @@ private data class CategoryResponse(
 @Serializable
 private data class CategoryArchiveRequest(
     val archived: Boolean
+)
+
+@Serializable
+private data class AccountList(
+    val accounts: List<Account>
+)
+
+@Serializable
+private data class Account(
+    val id: String,
+    @SerialName("family_id") val familyId: String,
+    val name: String,
+    val type: String,
+    val currency: String,
+    @SerialName("balance_minor") val balanceMinor: Long,
+    @SerialName("is_archived") val isArchived: Boolean,
+    @SerialName("created_at") val createdAt: String,
+    @SerialName("updated_at") val updatedAt: String
+)
+
+@Serializable
+private data class AccountPayload(
+    val name: String,
+    val type: String,
+    val currency: String? = null,
+    @SerialName("initial_balance_minor") val initialBalanceMinor: Long? = null
+)
+
+@Serializable
+private data class AccountResponse(
+    val account: Account
 )
