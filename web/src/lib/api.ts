@@ -60,7 +60,7 @@ export interface Transaction {
   type: 'income' | 'expense';
   amount_minor: number;
   currency: string;
-  description?: string;
+  comment?: string;
   occurred_at: string;
   created_at: string;
   updated_at: string;
@@ -78,8 +78,13 @@ export interface TransactionRequest {
   type: 'income' | 'expense';
   amount_minor: number;
   currency: string;
-  description?: string;
+  comment?: string;
   occurred_at: string;
+}
+
+export interface TransactionFilters {
+  start_date?: string;
+  end_date?: string;
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:8080';
@@ -149,7 +154,16 @@ export async function createTransaction(payload: TransactionRequest): Promise<Tr
   return data.transaction;
 }
 
-export async function fetchTransactions(userId: string): Promise<Transaction[]> {
-  const data = await request<{ transactions: Transaction[] }>(`/api/v1/users/${userId}/transactions`);
+export async function fetchTransactions(userId: string, filters?: TransactionFilters): Promise<Transaction[]> {
+  const search = new URLSearchParams();
+  if (filters?.start_date) {
+    search.set('start_date', filters.start_date);
+  }
+  if (filters?.end_date) {
+    search.set('end_date', filters.end_date);
+  }
+  const query = search.toString();
+  const url = `/api/v1/users/${userId}/transactions${query ? `?${query}` : ''}`;
+  const data = await request<{ transactions: Transaction[] }>(url);
   return data.transactions;
 }

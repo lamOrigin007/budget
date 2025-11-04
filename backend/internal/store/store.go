@@ -165,14 +165,26 @@ func nullableString(value string) interface{} {
 }
 
 func (s *Store) CreateTransaction(ctx context.Context, txn *domain.Transaction) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO transactions (id, family_id, user_id, category_id, type, amount_minor, currency, description, occurred_at, created_at, updated_at)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO transactions (id, family_id, user_id, category_id, type, amount_minor, currency, comment, occurred_at, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		txn.ID, txn.FamilyID, txn.UserID, txn.CategoryID, txn.Type, txn.AmountMinor, txn.Currency, txn.Description, txn.OccurredAt, txn.CreatedAt, txn.UpdatedAt)
+		txn.ID, txn.FamilyID, txn.UserID, txn.CategoryID, txn.Type, txn.AmountMinor, txn.Currency, nullableString(txn.Comment), txn.OccurredAt, txn.CreatedAt, txn.UpdatedAt)
 	return err
 }
 
-func (s *Store) ListTransactionsByUser(ctx context.Context, userID string) ([]domain.Transaction, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, family_id, user_id, category_id, type, amount_minor, currency, description, occurred_at, created_at, updated_at FROM transactions WHERE user_id = ? ORDER BY occurred_at DESC`, userID)
+func (s *Store) ListTransactionsByUser(ctx context.Context, userID string, start, end *time.Time) ([]domain.Transaction, error) {
+	baseQuery := `SELECT id, family_id, user_id, category_id, type, amount_minor, currency, comment, occurred_at, created_at, updated_at FROM transactions WHERE user_id = ?`
+	args := []interface{}{userID}
+	if start != nil {
+		baseQuery += " AND occurred_at >= ?"
+		args = append(args, start.UTC())
+	}
+	if end != nil {
+		baseQuery += " AND occurred_at <= ?"
+		args = append(args, end.UTC())
+	}
+	baseQuery += " ORDER BY occurred_at DESC"
+
+	rows, err := s.db.QueryContext(ctx, baseQuery, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -181,8 +193,12 @@ func (s *Store) ListTransactionsByUser(ctx context.Context, userID string) ([]do
 	var txns []domain.Transaction
 	for rows.Next() {
 		var txn domain.Transaction
-		if err := rows.Scan(&txn.ID, &txn.FamilyID, &txn.UserID, &txn.CategoryID, &txn.Type, &txn.AmountMinor, &txn.Currency, &txn.Description, &txn.OccurredAt, &txn.CreatedAt, &txn.UpdatedAt); err != nil {
+		var comment sql.NullString
+		if err := rows.Scan(&txn.ID, &txn.FamilyID, &txn.UserID, &txn.CategoryID, &txn.Type, &txn.AmountMinor, &txn.Currency, &comment, &txn.OccurredAt, &txn.CreatedAt, &txn.UpdatedAt); err != nil {
 			return nil, err
+		}
+		if comment.Valid {
+			txn.Comment = comment.String
 		}
 		txns = append(txns, txn)
 	}

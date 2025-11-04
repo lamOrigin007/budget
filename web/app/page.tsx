@@ -1,6 +1,38 @@
 'use client';
 
 import { FormEvent, useMemo, useState } from 'react';
+
+function startOfCurrentMonth(): Date {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+}
+
+function formatDateInput(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function toRFC3339FromDateInput(value: string, endOfDay = false): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const time = endOfDay ? '23:59:59.999' : '00:00:00.000';
+  const iso = `${value}T${time}Z`;
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) {
+    return undefined;
+  }
+  return parsed.toISOString();
+}
+
+function isWithinPeriod(occurredAt: string, start: string, end: string): boolean {
+  const occurred = new Date(occurredAt).getTime();
+  if (Number.isNaN(occurred)) {
+    return false;
+  }
+  const startTime = start ? new Date(`${start}T00:00:00.000Z`).getTime() : Number.NEGATIVE_INFINITY;
+  const endTime = end ? new Date(`${end}T23:59:59.999Z`).getTime() : Number.POSITIVE_INFINITY;
+  return occurred >= startTime && occurred <= endTime;
+}
 import {
   Category,
   CategoryPayload,
@@ -26,7 +58,10 @@ export default function Home() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [transactionsError, setTransactionsError] = useState<string | null>(null);
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [isSavingTransaction, setIsSavingTransaction] = useState(false);
+  const [isTransactionsLoading, setIsTransactionsLoading] = useState(false);
   const [isCategorySubmitting, setIsCategorySubmitting] = useState(false);
   const [categoryError, setCategoryError] = useState<string | null>(null);
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
@@ -43,6 +78,8 @@ export default function Home() {
     description: '',
     parent_id: ''
   });
+  const [periodStart, setPeriodStart] = useState(() => formatDateInput(startOfCurrentMonth()));
+  const [periodEnd, setPeriodEnd] = useState(() => formatDateInput(new Date()));
 
   const activeCategories = useMemo(
     () => categories.filter((category) => !category.is_archived),
@@ -53,13 +90,43 @@ export default function Home() {
     [categories]
   );
 
+  async function loadTransactionsForCurrentPeriod(userId: string) {
+    const startIso = toRFC3339FromDateInput(periodStart);
+    const endIso = toRFC3339FromDateInput(periodEnd, true);
+    if (startIso && endIso && new Date(startIso).getTime() > new Date(endIso).getTime()) {
+      setTransactionsError('Дата начала должна быть не позже даты окончания');
+      setTransactions([]);
+      return;
+    }
+
+    setTransactionsError(null);
+    setIsTransactionsLoading(true);
+    try {
+      const tx = await fetchTransactions(userId, {
+        ...(startIso ? { start_date: startIso } : {}),
+        ...(endIso ? { end_date: endIso } : {})
+      });
+      setTransactions(sortTransactions(tx));
+    } catch (error) {
+      setTransactionsError(error instanceof Error ? error.message : 'Не удалось загрузить операции');
+    } finally {
+      setIsTransactionsLoading(false);
+    }
+  }
+
+  function sortTransactions(list: Transaction[]) {
+    return [...list].sort(
+      (left, right) => new Date(right.occurred_at).getTime() - new Date(left.occurred_at).getTime()
+    );
+  }
+
   async function handleRegister(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-      setRegisterError(null);
-      const formData = new FormData(event.currentTarget);
-      setIsSubmitting(true);
-      try {
-        const response = await registerUser({
+    setRegisterError(null);
+    const formData = new FormData(event.currentTarget);
+    setIsRegistering(true);
+    try {
+      const response = await registerUser({
         email: String(formData.get('email') ?? ''),
         password: String(formData.get('password') ?? ''),
         name: String(formData.get('name') ?? ''),
@@ -69,16 +136,15 @@ export default function Home() {
       });
       setUserData(response);
       const cats = await fetchCategories(response.user.id);
-      setCategories(cats);
-      const tx = await fetchTransactions(response.user.id);
-      setTransactions(tx);
+      setCategories(sortCategories(cats));
+      await loadTransactionsForCurrentPeriod(response.user.id);
       setStep('dashboard');
       event.currentTarget.reset();
     } catch (error) {
       setRegisterError(error instanceof Error ? error.message : 'Не удалось зарегистрироваться');
     } finally {
-      setIsSubmitting(false);
-      }
+      setIsRegistering(false);
+    }
   }
 
   async function handleCreateTransaction(event: FormEvent<HTMLFormElement>) {
@@ -86,24 +152,34 @@ export default function Home() {
     if (!userData) return;
     setCreateError(null);
     const formData = new FormData(event.currentTarget);
-    setIsSubmitting(true);
+    setIsSavingTransaction(true);
     try {
+      const occurredInput = String(formData.get('occurred_at') ?? '');
+      const occurredAt = occurredInput ? new Date(occurredInput).toISOString() : new Date().toISOString();
       const transaction = await createTransaction({
         user_id: userData.user.id,
         category_id: String(formData.get('category_id') ?? ''),
         type: String(formData.get('type') ?? 'expense') as 'income' | 'expense',
         amount_minor: Number(formData.get('amount_minor') ?? 0),
         currency: userData.user.currency_default,
-        description: String(formData.get('description') ?? ''),
-        occurred_at: new Date(String(formData.get('occurred_at') ?? new Date().toISOString())).toISOString()
+        comment: String(formData.get('comment') ?? '').trim(),
+        occurred_at: occurredAt
       });
-      setTransactions((prev) => [transaction, ...prev]);
+      if (isWithinPeriod(transaction.occurred_at, periodStart, periodEnd)) {
+        setTransactions((prev) => sortTransactions([transaction, ...prev]));
+      }
       event.currentTarget.reset();
     } catch (error) {
       setCreateError(error instanceof Error ? error.message : 'Не удалось создать операцию');
     } finally {
-      setIsSubmitting(false);
+      setIsSavingTransaction(false);
     }
+  }
+
+  async function handlePeriodSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!userData) return;
+    await loadTransactionsForCurrentPeriod(userData.user.id);
   }
 
   function resetCategoryForm() {
@@ -222,8 +298,8 @@ export default function Home() {
               <input id="family_name" name="family_name" placeholder="Семья Ивановых" className="input" />
             </div>
             {registerError && <p className="error">{registerError}</p>}
-            <button type="submit" disabled={isSubmitting} className="button">
-              {isSubmitting ? 'Создание...' : 'Создать семью'}
+            <button type="submit" disabled={isRegistering} className="button">
+              {isRegistering ? 'Создание...' : 'Создать семью'}
             </button>
           </form>
         </div>
@@ -364,19 +440,59 @@ export default function Home() {
               <input id="occurred_at" name="occurred_at" type="datetime-local" className="input" />
             </div>
             <div className="input-group">
-              <label htmlFor="description">Описание</label>
-              <textarea id="description" name="description" rows={3} className="textarea" />
+              <label htmlFor="comment">Комментарий</label>
+              <textarea id="comment" name="comment" rows={3} className="textarea" />
             </div>
             {createError && <p className="error">{createError}</p>}
-            <button type="submit" disabled={isSubmitting} className="button">
-              {isSubmitting ? 'Сохранение...' : 'Добавить операцию'}
+            <button type="submit" disabled={isSavingTransaction} className="button">
+              {isSavingTransaction ? 'Сохранение...' : 'Добавить операцию'}
             </button>
           </form>
         </article>
 
         <article className="panel">
           <h2>Операции пользователя</h2>
-          {transactions.length === 0 && <p className="highlight">Пока нет операций. Добавьте первую операцию.</p>}
+          <form
+            onSubmit={handlePeriodSubmit}
+            className="form-grid"
+            style={{
+              marginBottom: '1rem',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))'
+            }}
+          >
+            <div className="input-group">
+              <label htmlFor="period_start">Начало периода</label>
+              <input
+                id="period_start"
+                name="period_start"
+                type="date"
+                className="input"
+                value={periodStart}
+                onChange={(event) => setPeriodStart(event.target.value)}
+              />
+            </div>
+            <div className="input-group">
+              <label htmlFor="period_end">Окончание периода</label>
+              <input
+                id="period_end"
+                name="period_end"
+                type="date"
+                className="input"
+                value={periodEnd}
+                onChange={(event) => setPeriodEnd(event.target.value)}
+              />
+            </div>
+            <div className="input-group" style={{ alignSelf: 'flex-end' }}>
+              <button type="submit" className="button" disabled={isTransactionsLoading}>
+                {isTransactionsLoading ? 'Загрузка...' : 'Обновить период'}
+              </button>
+            </div>
+          </form>
+          {transactionsError && <p className="error">{transactionsError}</p>}
+          {isTransactionsLoading && <p className="highlight">Загрузка операций...</p>}
+          {!isTransactionsLoading && !transactionsError && transactions.length === 0 && (
+            <p className="highlight">Пока нет операций. Добавьте первую операцию.</p>
+          )}
           <ul className="transactions">
             {transactions.map((transaction) => {
               const category = categories.find((cat) => cat.id === transaction.category_id);
@@ -388,7 +504,9 @@ export default function Home() {
                   <div>
                     <p style={{ fontWeight: 600, color: category?.color ?? '#e2e8f0' }}>{category?.name ?? 'Категория'}</p>
                     <p className="meta">{new Date(transaction.occurred_at).toLocaleString()}</p>
-                    {transaction.description && <p className="highlight" style={{ color: '#e2e8f0', marginTop: '0.35rem' }}>{transaction.description}</p>}
+                    {transaction.comment && (
+                      <p className="highlight" style={{ color: '#e2e8f0', marginTop: '0.35rem' }}>{transaction.comment}</p>
+                    )}
                   </div>
                   <div className="amount" style={{ color }}>
                     {sign}
