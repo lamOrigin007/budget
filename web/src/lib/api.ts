@@ -107,6 +107,9 @@ export interface AccountPayload {
 export interface TransactionFilters {
   start_date?: string;
   end_date?: string;
+  type?: 'income' | 'expense';
+  category_id?: string;
+  account_id?: string;
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:8080';
@@ -196,6 +199,15 @@ export async function fetchTransactions(userId: string, filters?: TransactionFil
   }
   if (filters?.end_date) {
     search.set('end_date', filters.end_date);
+  }
+  if (filters?.type) {
+    search.set('type', filters.type);
+  }
+  if (filters?.category_id) {
+    search.set('category_id', filters.category_id);
+  }
+  if (filters?.account_id) {
+    search.set('account_id', filters.account_id);
   }
   const query = search.toString();
   const url = `/api/v1/users/${userId}/transactions${query ? `?${query}` : ''}`;

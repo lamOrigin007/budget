@@ -75,6 +75,9 @@ struct ContentView: View {
     @State private var transactionPeriodEnd = Date()
     @State private var isLoadingTransactions = false
     @State private var transactionsError = ""
+    @State private var transactionFilterType: TransactionTypeFilter = .all
+    @State private var transactionFilterCategoryId: String = ""
+    @State private var transactionFilterAccountId: String = ""
 
     var body: some View {
         NavigationView {
@@ -431,10 +434,20 @@ struct ContentView: View {
             isLoadingTransactions = false
             return
         }
-        components.queryItems = [
+        var queryItems = [
             URLQueryItem(name: "start_date", value: isoFormatter.string(from: start)),
             URLQueryItem(name: "end_date", value: isoFormatter.string(from: end))
         ]
+        if let apiType = transactionFilterType.apiValue {
+            queryItems.append(URLQueryItem(name: "type", value: apiType))
+        }
+        if !transactionFilterCategoryId.isEmpty {
+            queryItems.append(URLQueryItem(name: "category_id", value: transactionFilterCategoryId))
+        }
+        if !transactionFilterAccountId.isEmpty {
+            queryItems.append(URLQueryItem(name: "account_id", value: transactionFilterAccountId))
+        }
+        components.queryItems = queryItems
 
         guard let url = components.url else {
             isLoadingTransactions = false
@@ -532,7 +545,7 @@ struct ContentView: View {
 
             DispatchQueue.main.async {
                 let transaction = response.transaction
-                if isTransactionWithinCurrentPeriod(transaction) {
+                if isTransactionWithinCurrentPeriod(transaction) && matchesCurrentTransactionFilters(transaction) {
                     transactions.append(transaction)
                     transactions.sort { $0.occurredAt > $1.occurredAt }
                 }
@@ -550,12 +563,28 @@ struct ContentView: View {
         return transaction.occurredAt >= start && transaction.occurredAt <= end
     }
 
+    private func matchesCurrentTransactionFilters(_ transaction: Transaction) -> Bool {
+        if let kind = transactionFilterType.kind, transaction.type != kind {
+            return false
+        }
+        if !transactionFilterCategoryId.isEmpty, transaction.categoryId != transactionFilterCategoryId {
+            return false
+        }
+        if !transactionFilterAccountId.isEmpty, transaction.accountId != transactionFilterAccountId {
+            return false
+        }
+        return true
+    }
+
     private func ensureTransactionCategorySelection() {
         let activeIds = activeCategories.map(\.id)
         if !transactionCategoryId.isEmpty, activeIds.contains(transactionCategoryId) {
             return
         }
         transactionCategoryId = activeIds.first ?? ""
+        if !transactionFilterCategoryId.isEmpty, !categories.contains(where: { $0.id == transactionFilterCategoryId }) {
+            transactionFilterCategoryId = ""
+        }
     }
 
     private func ensureTransactionAccountSelection() {
@@ -563,6 +592,9 @@ struct ContentView: View {
             return
         }
         transactionAccountId = accounts.first?.id ?? ""
+        if !transactionFilterAccountId.isEmpty, !accounts.contains(where: { $0.id == transactionFilterAccountId }) {
+            transactionFilterAccountId = ""
+        }
     }
 
     @ViewBuilder
@@ -763,6 +795,27 @@ struct ContentView: View {
                     selection: $transactionPeriodEnd,
                     displayedComponents: .date
                 )
+            }
+            Picker("Тип", selection: $transactionFilterType) {
+                ForEach(TransactionTypeFilter.allCases) { filter in
+                    Text(filter.localizedTitle).tag(filter)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Picker("Категория", selection: $transactionFilterCategoryId) {
+                Text("Все категории").tag("")
+                ForEach(categories) { category in
+                    let suffix = category.isArchived ? " · архив" : ""
+                    Text("\(category.name)\(suffix)").tag(category.id)
+                }
+            }
+
+            Picker("Счёт", selection: $transactionFilterAccountId) {
+                Text("Все счета").tag("")
+                ForEach(accounts) { account in
+                    Text("\(account.name) · \(account.currency)").tag(account.id)
+                }
             }
             Button(action: refreshTransactionsForCurrentPeriod) {
                 if isLoadingTransactions {
@@ -1141,6 +1194,38 @@ private enum AccountKind: String, CaseIterable {
         case .bank: return "Банковский счёт"
         case .deposit: return "Вклад"
         case .wallet: return "Электронный кошелёк"
+        }
+    }
+}
+
+private enum TransactionTypeFilter: String, CaseIterable, Identifiable {
+    case all
+    case income
+    case expense
+
+    var id: String { rawValue }
+
+    var localizedTitle: String {
+        switch self {
+        case .all: return "Все"
+        case .income: return "Доходы"
+        case .expense: return "Расходы"
+        }
+    }
+
+    var apiValue: String? {
+        switch self {
+        case .all: return nil
+        case .income: return "income"
+        case .expense: return "expense"
+        }
+    }
+
+    var kind: TransactionKind? {
+        switch self {
+        case .all: return nil
+        case .income: return .income
+        case .expense: return .expense
         }
     }
 }

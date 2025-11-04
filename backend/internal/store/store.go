@@ -273,16 +273,36 @@ func (s *Store) CreateTransaction(ctx context.Context, txn *domain.Transaction) 
 	return nil
 }
 
-func (s *Store) ListTransactionsByUser(ctx context.Context, userID string, start, end *time.Time) ([]domain.Transaction, error) {
+type TransactionListFilters struct {
+	Start      *time.Time
+	End        *time.Time
+	Type       string
+	CategoryID string
+	AccountID  string
+}
+
+func (s *Store) ListTransactionsByUser(ctx context.Context, userID string, filters TransactionListFilters) ([]domain.Transaction, error) {
 	baseQuery := `SELECT id, family_id, user_id, account_id, category_id, type, amount_minor, currency, comment, occurred_at, created_at, updated_at FROM transactions WHERE user_id = ?`
 	args := []interface{}{userID}
-	if start != nil {
+	if filters.Start != nil {
 		baseQuery += " AND occurred_at >= ?"
-		args = append(args, start.UTC())
+		args = append(args, filters.Start.UTC())
 	}
-	if end != nil {
+	if filters.End != nil {
 		baseQuery += " AND occurred_at <= ?"
-		args = append(args, end.UTC())
+		args = append(args, filters.End.UTC())
+	}
+	if trimmed := strings.TrimSpace(filters.Type); trimmed != "" {
+		baseQuery += " AND LOWER(type) = ?"
+		args = append(args, strings.ToLower(trimmed))
+	}
+	if trimmed := strings.TrimSpace(filters.CategoryID); trimmed != "" {
+		baseQuery += " AND category_id = ?"
+		args = append(args, trimmed)
+	}
+	if trimmed := strings.TrimSpace(filters.AccountID); trimmed != "" {
+		baseQuery += " AND account_id = ?"
+		args = append(args, trimmed)
 	}
 	baseQuery += " ORDER BY occurred_at DESC"
 

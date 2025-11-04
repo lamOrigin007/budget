@@ -245,6 +245,25 @@ paths:
             type: string
             format: date-time
           description: RFC3339 timestamp inclusive upper bound
+        - name: type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [income, expense]
+          description: Filter operations by type
+        - name: category_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Return operations for a specific category
+        - name: account_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Return operations for a specific account
       responses:
         '200':
           description: Transactions

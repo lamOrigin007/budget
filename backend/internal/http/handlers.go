@@ -518,7 +518,42 @@ func (h *Handlers) ListTransactions(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "start_date must be before end_date"})
 	}
 
-	txns, err := h.store.ListTransactionsByUser(c.Request().Context(), userID, startDate, endDate)
+	txnType := strings.TrimSpace(strings.ToLower(c.QueryParam("type")))
+	if txnType != "" && txnType != "income" && txnType != "expense" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "type must be income or expense"})
+	}
+
+	categoryID := strings.TrimSpace(c.QueryParam("category_id"))
+	if categoryID != "" {
+		category, err := h.store.GetCategory(c.Request().Context(), categoryID)
+		if err != nil {
+			return err
+		}
+		if category == nil || category.FamilyID != user.FamilyID {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "category not found"})
+		}
+	}
+
+	accountID := strings.TrimSpace(c.QueryParam("account_id"))
+	if accountID != "" {
+		account, err := h.store.GetAccount(c.Request().Context(), accountID)
+		if err != nil {
+			return err
+		}
+		if account == nil || account.FamilyID != user.FamilyID {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "account not found"})
+		}
+	}
+
+	filters := store.TransactionListFilters{
+		Start:      startDate,
+		End:        endDate,
+		Type:       txnType,
+		CategoryID: categoryID,
+		AccountID:  accountID,
+	}
+
+	txns, err := h.store.ListTransactionsByUser(c.Request().Context(), userID, filters)
 	if err != nil {
 		return err
 	}
