@@ -62,7 +62,7 @@ type TransactionRequest struct {
 	Type        string `json:"type"`
 	AmountMinor int64  `json:"amount_minor"`
 	Currency    string `json:"currency"`
-	Description string `json:"description"`
+	Comment     string `json:"comment"`
 	OccurredAt  string `json:"occurred_at"`
 }
 
@@ -379,8 +379,8 @@ func (h *Handlers) CreateTransaction(c echo.Context) error {
 		Type:        req.Type,
 		AmountMinor: req.AmountMinor,
 		Currency:    strings.ToUpper(req.Currency),
-		Description: req.Description,
-		OccurredAt:  occurredAt,
+		Comment:     strings.TrimSpace(req.Comment),
+		OccurredAt:  occurredAt.UTC(),
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
@@ -402,11 +402,35 @@ func (h *Handlers) ListTransactions(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
 	}
 
-	txns, err := h.store.ListTransactionsByUser(c.Request().Context(), userID)
+	startDate, err := parseOptionalTime(c.QueryParam("start_date"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "start_date must be RFC3339"})
+	}
+	endDate, err := parseOptionalTime(c.QueryParam("end_date"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "end_date must be RFC3339"})
+	}
+	if startDate != nil && endDate != nil && startDate.After(*endDate) {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "start_date must be before end_date"})
+	}
+
+	txns, err := h.store.ListTransactionsByUser(c.Request().Context(), userID, startDate, endDate)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{"transactions": txns})
+}
+
+func parseOptionalTime(value string) (*time.Time, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return nil, err
+	}
+	t := parsed.UTC()
+	return &t, nil
 }
 
 func (h *Handlers) bootstrapCategories(ctx context.Context, familyID string) error {

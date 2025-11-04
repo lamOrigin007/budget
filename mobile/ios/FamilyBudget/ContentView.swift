@@ -1,5 +1,41 @@
 import SwiftUI
 
+private let isoFormatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    return formatter
+}()
+
+private let displayFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateStyle = .medium
+    formatter.timeStyle = .short
+    return formatter
+}()
+
+private let utcCalendar: Calendar = {
+    var calendar = Calendar(identifier: .iso8601)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
+    return calendar
+}()
+
+private func localStartOfCurrentMonth() -> Date {
+    let calendar = Calendar.current
+    let components = calendar.dateComponents([.year, .month], from: Date())
+    return calendar.date(from: components) ?? Date()
+}
+
+private func startOfDayUTC(_ date: Date) -> Date {
+    utcCalendar.startOfDay(for: date)
+}
+
+private func endOfDayUTC(_ date: Date) -> Date {
+    let start = utcCalendar.startOfDay(for: date)
+    let nextDay = utcCalendar.date(byAdding: .day, value: 1, to: start) ?? start
+    return nextDay.addingTimeInterval(-0.001)
+}
+
 struct ContentView: View {
     @State private var email = ""
     @State private var password = ""
@@ -19,6 +55,18 @@ struct ContentView: View {
     @State private var editingCategoryId: String? = nil
     @State private var categoryMessage = ""
     @State private var isSavingCategory = false
+    @State private var transactions: [Transaction] = []
+    @State private var transactionType: TransactionKind = .expense
+    @State private var transactionCategoryId: String = ""
+    @State private var transactionAmount = ""
+    @State private var transactionDate = Date()
+    @State private var transactionComment = ""
+    @State private var transactionMessage = ""
+    @State private var isSavingTransaction = false
+    @State private var transactionPeriodStart = localStartOfCurrentMonth()
+    @State private var transactionPeriodEnd = Date()
+    @State private var isLoadingTransactions = false
+    @State private var transactionsError = ""
 
     var body: some View {
         NavigationView {
@@ -72,11 +120,22 @@ struct ContentView: View {
     private var categoryManagement: some View {
         Group {
             if let user = user {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text(family?.name ?? "")
-                        .font(.headline)
+                VStack(alignment: .leading, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(family?.name ?? "")
+                            .font(.headline)
+                        if let currency = family?.currencyBase {
+                            Text("Валюта семьи: \(currency)")
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                     categoryForm(userId: user.id)
                     categoryLists(userId: user.id)
+                    Divider()
+                    transactionFilters()
+                    transactionForm(user: user)
+                    transactionsHistory()
                 }
                 .padding()
                 .background(.thinMaterial)
@@ -133,6 +192,7 @@ struct ContentView: View {
                 user = registerResponse.user
                 family = registerResponse.family
                 status = "Профиль создан для \(registerResponse.user.name)"
+                refreshTransactionsForCurrentPeriod()
             }
 
             loadCategories(userId: registerResponse.user.id)
@@ -153,6 +213,7 @@ struct ContentView: View {
                     }
                     return !lhs.isArchived && rhs.isArchived
                 }
+                ensureTransactionCategorySelection()
             }
         }.resume()
     }
@@ -217,6 +278,7 @@ struct ContentView: View {
                     return !lhs.isArchived && rhs.isArchived
                 }
                 categoryMessage = isEditing ? "Категория обновлена" : "Категория создана"
+                ensureTransactionCategorySelection()
                 resetCategoryForm()
             }
         }.resume()
@@ -253,6 +315,7 @@ struct ContentView: View {
                 if archived && editingCategoryId == category.id {
                     resetCategoryForm()
                 }
+                ensureTransactionCategorySelection()
             }
         }.resume()
     }
@@ -264,6 +327,140 @@ struct ContentView: View {
         categoryDescription = ""
         categoryParentId = nil
         editingCategoryId = nil
+    }
+
+    private func refreshTransactionsForCurrentPeriod() {
+        guard let user = user else { return }
+        let start = startOfDayUTC(transactionPeriodStart)
+        let end = endOfDayUTC(transactionPeriodEnd)
+        guard start <= end else {
+            transactionsError = "Дата начала не может быть позже даты окончания"
+            transactions = []
+            return
+        }
+
+        transactionsError = ""
+        isLoadingTransactions = true
+
+        guard var components = URLComponents(string: "http://localhost:8080/api/v1/users/\(user.id)/transactions") else {
+            isLoadingTransactions = false
+            return
+        }
+        components.queryItems = [
+            URLQueryItem(name: "start_date", value: isoFormatter.string(from: start)),
+            URLQueryItem(name: "end_date", value: isoFormatter.string(from: end))
+        ]
+
+        guard let url = components.url else {
+            isLoadingTransactions = false
+            return
+        }
+
+        URLSession.shared.dataTask(with: url) { data, _, error in
+            DispatchQueue.main.async {
+                isLoadingTransactions = false
+            }
+            if let error = error {
+                DispatchQueue.main.async {
+                    transactionsError = "Ошибка: \(error.localizedDescription)"
+                }
+                return
+            }
+            guard
+                let data = data,
+                let response = try? JSONDecoder().decode(TransactionList.self, from: data)
+            else {
+                DispatchQueue.main.async {
+                    transactionsError = "Не удалось загрузить операции"
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                transactions = response.transactions.sorted { $0.occurredAt > $1.occurredAt }
+            }
+        }.resume()
+    }
+
+    private func saveTransaction(for user: User) {
+        let selectedCategory = transactionCategoryId.isEmpty ? activeCategories.first?.id : transactionCategoryId
+        guard let categoryId = selectedCategory else {
+            transactionMessage = "Выберите категорию"
+            return
+        }
+        guard let amount = Int64(transactionAmount) else {
+            transactionMessage = "Сумма должна быть целым числом"
+            return
+        }
+        guard amount != 0 else {
+            transactionMessage = "Сумма не может быть нулевой"
+            return
+        }
+
+        guard let url = URL(string: "http://localhost:8080/api/v1/transactions") else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let payload = TransactionRequest(
+            userId: user.id,
+            categoryId: categoryId,
+            type: transactionType.rawValue,
+            amountMinor: amount,
+            currency: user.currencyDefault,
+            comment: transactionComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : transactionComment,
+            occurredAt: isoFormatter.string(from: transactionDate)
+        )
+
+        request.httpBody = try? JSONEncoder().encode(payload)
+        transactionMessage = ""
+        isSavingTransaction = true
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async {
+                isSavingTransaction = false
+            }
+            if let error = error {
+                DispatchQueue.main.async {
+                    transactionMessage = "Ошибка: \(error.localizedDescription)"
+                }
+                return
+            }
+            guard
+                let data = data,
+                let response = try? JSONDecoder().decode(TransactionResponse.self, from: data)
+            else {
+                DispatchQueue.main.async {
+                    transactionMessage = "Некорректный ответ сервера"
+                }
+                return
+            }
+
+            DispatchQueue.main.async {
+                let transaction = response.transaction
+                if isTransactionWithinCurrentPeriod(transaction) {
+                    transactions.append(transaction)
+                    transactions.sort { $0.occurredAt > $1.occurredAt }
+                }
+                transactionAmount = ""
+                transactionComment = ""
+                transactionMessage = "Операция сохранена"
+            }
+        }.resume()
+    }
+
+    private func isTransactionWithinCurrentPeriod(_ transaction: Transaction) -> Bool {
+        let start = startOfDayUTC(transactionPeriodStart)
+        let end = endOfDayUTC(transactionPeriodEnd)
+        return transaction.occurredAt >= start && transaction.occurredAt <= end
+    }
+
+    private func ensureTransactionCategorySelection() {
+        let activeIds = activeCategories.map(\.id)
+        if !transactionCategoryId.isEmpty, activeIds.contains(transactionCategoryId) {
+            return
+        }
+        transactionCategoryId = activeIds.first ?? ""
     }
 
     @ViewBuilder
@@ -386,6 +583,145 @@ struct ContentView: View {
         .cornerRadius(12)
     }
 
+    @ViewBuilder
+    private func transactionFilters() -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Период операций")
+                .font(.headline)
+            HStack {
+                DatePicker(
+                    "Начало",
+                    selection: $transactionPeriodStart,
+                    displayedComponents: .date
+                )
+                DatePicker(
+                    "Конец",
+                    selection: $transactionPeriodEnd,
+                    displayedComponents: .date
+                )
+            }
+            Button(action: refreshTransactionsForCurrentPeriod) {
+                if isLoadingTransactions {
+                    ProgressView()
+                }
+                Text("Обновить период")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isLoadingTransactions)
+
+            if !transactionsError.isEmpty {
+                Text(transactionsError)
+                    .font(.footnote)
+                    .foregroundColor(.red)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func transactionForm(user: User) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Новая операция")
+                .font(.headline)
+            Picker("Тип", selection: $transactionType) {
+                ForEach(TransactionKind.allCases, id: \.self) { kind in
+                    Text(kind.localizedTitle).tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if activeCategories.isEmpty {
+                Text("Добавьте хотя бы одну активную категорию для создания операции")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            } else {
+                Picker("Категория", selection: $transactionCategoryId) {
+                    ForEach(activeCategories) { category in
+                        Text(category.name).tag(category.id)
+                    }
+                }
+            }
+
+            TextField("Сумма в минорных единицах", text: $transactionAmount)
+                .textFieldStyle(.roundedBorder)
+                .keyboardType(.numberPad)
+
+            DatePicker(
+                "Дата и время",
+                selection: $transactionDate,
+                displayedComponents: [.date, .hourAndMinute]
+            )
+
+            TextField("Комментарий", text: $transactionComment)
+                .textFieldStyle(.roundedBorder)
+
+            Button(action: { saveTransaction(for: user) }) {
+                if isSavingTransaction {
+                    ProgressView()
+                }
+                Text("Сохранить операцию")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isSavingTransaction || activeCategories.isEmpty)
+
+            if !transactionMessage.isEmpty {
+                Text(transactionMessage)
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func transactionsHistory() -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("История операций")
+                .font(.headline)
+
+            if isLoadingTransactions {
+                ProgressView("Загрузка операций…")
+            }
+
+            if transactions.isEmpty && !isLoadingTransactions && transactionsError.isEmpty {
+                Text("За выбранный период операций нет")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+
+            ForEach(transactions) { transaction in
+                transactionRow(transaction: transaction)
+            }
+        }
+    }
+
+    private func transactionRow(transaction: Transaction) -> some View {
+        let categoryName = categories.first(where: { $0.id == transaction.categoryId })?.name ?? "Категория"
+        let amount = Double(transaction.amountMinor) / 100.0
+        let amountText = String(format: "%@%.2f %@", transaction.type.symbol, abs(amount), transaction.currency)
+        let comment = transaction.comment?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(categoryName)
+                    .font(.subheadline)
+                    .bold()
+                Spacer()
+                Text(amountText)
+                    .font(.subheadline)
+                    .foregroundColor(transaction.type.tint)
+            }
+            Text(displayFormatter.string(from: transaction.occurredAt))
+                .font(.caption)
+                .foregroundColor(.secondary)
+            if let comment, !comment.isEmpty {
+                Text(comment)
+                    .font(.footnote)
+            }
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .cornerRadius(12)
+    }
+
     private var activeCategories: [Category] {
         categories.filter { !$0.isArchived }
     }
@@ -423,12 +759,34 @@ private struct RegisterResponse: Codable {
 
 private struct User: Codable {
     let id: String
+    let familyId: String
+    let email: String
     let name: String
+    let role: String
+    let locale: String
+    let currencyDefault: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case familyId = "family_id"
+        case email
+        case name
+        case role
+        case locale
+        case currencyDefault = "currency_default"
+    }
 }
 
 private struct Family: Codable {
     let id: String
     let name: String
+    let currencyBase: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case currencyBase = "currency_base"
+    }
 }
 
 private struct CategoryList: Codable {
@@ -504,4 +862,110 @@ private enum CategoryType: String, CaseIterable {
         case .transfer: return "Перевод"
         }
     }
+}
+
+private enum TransactionKind: String, CaseIterable, Codable {
+    case income
+    case expense
+
+    var localizedTitle: String {
+        switch self {
+        case .income: return "Доход"
+        case .expense: return "Расход"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .income: return "+"
+        case .expense: return "-"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .income: return .green
+        case .expense: return .red
+        }
+    }
+}
+
+private struct TransactionList: Decodable {
+    let transactions: [Transaction]
+}
+
+private struct Transaction: Decodable, Identifiable {
+    let id: String
+    let familyId: String
+    let userId: String
+    let categoryId: String
+    let type: TransactionKind
+    let amountMinor: Int64
+    let currency: String
+    let comment: String?
+    let occurredAt: Date
+    let createdAt: Date
+    let updatedAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case familyId = "family_id"
+        case userId = "user_id"
+        case categoryId = "category_id"
+        case type
+        case amountMinor = "amount_minor"
+        case currency
+        case comment
+        case occurredAt = "occurred_at"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        familyId = try container.decode(String.self, forKey: .familyId)
+        userId = try container.decode(String.self, forKey: .userId)
+        categoryId = try container.decode(String.self, forKey: .categoryId)
+        type = try container.decode(TransactionKind.self, forKey: .type)
+        amountMinor = try container.decode(Int64.self, forKey: .amountMinor)
+        currency = try container.decode(String.self, forKey: .currency)
+        comment = try container.decodeIfPresent(String.self, forKey: .comment)
+
+        func decodeDate(_ key: CodingKeys) throws -> Date {
+            let value = try container.decode(String.self, forKey: key)
+            if let date = isoFormatter.date(from: value) {
+                return date
+            }
+            throw DecodingError.dataCorruptedError(forKey: key, in: container, debugDescription: "Некорректный формат даты")
+        }
+
+        occurredAt = try decodeDate(.occurredAt)
+        createdAt = try decodeDate(.createdAt)
+        updatedAt = try decodeDate(.updatedAt)
+    }
+}
+
+private struct TransactionRequest: Encodable {
+    let userId: String
+    let categoryId: String
+    let type: String
+    let amountMinor: Int64
+    let currency: String
+    let comment: String?
+    let occurredAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case userId = "user_id"
+        case categoryId = "category_id"
+        case type
+        case amountMinor = "amount_minor"
+        case currency
+        case comment
+        case occurredAt = "occurred_at"
+    }
+}
+
+private struct TransactionResponse: Decodable {
+    let transaction: Transaction
 }

@@ -183,6 +183,20 @@ paths:
           required: true
           schema:
             type: string
+        - name: start_date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: RFC3339 timestamp inclusive lower bound
+        - name: end_date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: RFC3339 timestamp inclusive upper bound
       responses:
         '200':
           description: Transactions
@@ -358,8 +372,9 @@ components:
           type: integer
         currency:
           type: string
-        description:
+        comment:
           type: string
+          nullable: true
         occurred_at:
           type: string
           format: date-time
@@ -384,8 +399,9 @@ components:
           type: integer
         currency:
           type: string
-        description:
+        comment:
           type: string
+          nullable: true
         occurred_at:
           type: string
           format: date-time

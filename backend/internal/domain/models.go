@@ -43,7 +43,7 @@ type Transaction struct {
 	Type        string    `json:"type"`
 	AmountMinor int64     `json:"amount_minor"`
 	Currency    string    `json:"currency"`
-	Description string    `json:"description"`
+	Comment     string    `json:"comment,omitempty"`
 	OccurredAt  time.Time `json:"occurred_at"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
