@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 func OpenSQLite(path string) (*sql.DB, error) {
@@ -40,11 +41,15 @@ func migrate(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS categories (
             id TEXT PRIMARY KEY,
             family_id TEXT NOT NULL REFERENCES families(id),
+            parent_id TEXT NULL REFERENCES categories(id),
             name TEXT NOT NULL,
             type TEXT NOT NULL,
             color TEXT NOT NULL,
+            description TEXT,
             is_system INTEGER NOT NULL,
-            created_at TIMESTAMP NOT NULL
+            is_archived INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP NOT NULL,
+            updated_at TIMESTAMP NOT NULL
         );`,
 		`CREATE TABLE IF NOT EXISTS transactions (
             id TEXT PRIMARY KEY,
@@ -69,5 +74,24 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
+
+	alterStatements := []string{
+		`ALTER TABLE categories ADD COLUMN parent_id TEXT NULL REFERENCES categories(id);`,
+		`ALTER TABLE categories ADD COLUMN description TEXT;`,
+		`ALTER TABLE categories ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE categories ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;`,
+	}
+
+	for _, stmt := range alterStatements {
+		if _, err := db.Exec(stmt); err != nil {
+			if !isDuplicateColumnError(err) {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+func isDuplicateColumnError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "duplicate column name")
 }
