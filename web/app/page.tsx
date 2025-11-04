@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
 
 function startOfCurrentMonth(): Date {
   const now = new Date();
@@ -106,6 +106,9 @@ export default function Home() {
   });
   const [periodStart, setPeriodStart] = useState(() => formatDateInput(startOfCurrentMonth()));
   const [periodEnd, setPeriodEnd] = useState(() => formatDateInput(new Date()));
+  const [filterType, setFilterType] = useState<'income' | 'expense' | ''>('');
+  const [filterCategoryId, setFilterCategoryId] = useState<string>('');
+  const [filterAccountId, setFilterAccountId] = useState<string>('');
 
   const activeCategories = useMemo(
     () => categories.filter((category) => !category.is_archived),
@@ -116,6 +119,18 @@ export default function Home() {
     [categories]
   );
   const hasAccounts = accounts.length > 0;
+
+  useEffect(() => {
+    if (filterCategoryId && !categories.some((category) => category.id === filterCategoryId)) {
+      setFilterCategoryId('');
+    }
+  }, [categories, filterCategoryId]);
+
+  useEffect(() => {
+    if (filterAccountId && !accounts.some((account) => account.id === filterAccountId)) {
+      setFilterAccountId('');
+    }
+  }, [accounts, filterAccountId]);
 
   function sortAccounts(list: Account[]) {
     return [...list].sort((left, right) => left.name.localeCompare(right.name, 'ru'));
@@ -138,6 +153,12 @@ export default function Home() {
       }
       return list[0]?.id ?? '';
     });
+    setFilterAccountId((current) => {
+      if (current && list.some((account) => account.id === current)) {
+        return current;
+      }
+      return '';
+    });
   }
 
   async function loadTransactionsForCurrentPeriod(userId: string) {
@@ -154,7 +175,10 @@ export default function Home() {
     try {
       const tx = await fetchTransactions(userId, {
         ...(startIso ? { start_date: startIso } : {}),
-        ...(endIso ? { end_date: endIso } : {})
+        ...(endIso ? { end_date: endIso } : {}),
+        ...(filterType ? { type: filterType } : {}),
+        ...(filterCategoryId ? { category_id: filterCategoryId } : {}),
+        ...(filterAccountId ? { account_id: filterAccountId } : {})
       });
       setTransactions(sortTransactions(tx));
     } catch (error) {
@@ -168,6 +192,19 @@ export default function Home() {
     return [...list].sort(
       (left, right) => new Date(right.occurred_at).getTime() - new Date(left.occurred_at).getTime()
     );
+  }
+
+  function matchesTransactionFilters(transaction: Transaction) {
+    if (filterType && transaction.type !== filterType) {
+      return false;
+    }
+    if (filterCategoryId && transaction.category_id !== filterCategoryId) {
+      return false;
+    }
+    if (filterAccountId && transaction.account_id !== filterAccountId) {
+      return false;
+    }
+    return true;
   }
 
   async function handleRegister(event: FormEvent<HTMLFormElement>) {
@@ -233,7 +270,10 @@ export default function Home() {
         comment: String(formData.get('comment') ?? '').trim(),
         occurred_at: occurredAt
       });
-      if (isWithinPeriod(transaction.occurred_at, periodStart, periodEnd)) {
+      if (
+        isWithinPeriod(transaction.occurred_at, periodStart, periodEnd) &&
+        matchesTransactionFilters(transaction)
+      ) {
         setTransactions((prev) => sortTransactions([transaction, ...prev]));
       }
       await refreshAccounts(userData.user.id, account.id);
@@ -701,6 +741,55 @@ export default function Home() {
                 value={periodEnd}
                 onChange={(event) => setPeriodEnd(event.target.value)}
               />
+            </div>
+            <div className="input-group">
+              <label htmlFor="filter_type">Тип операции</label>
+              <select
+                id="filter_type"
+                name="filter_type"
+                className="select"
+                value={filterType}
+                onChange={(event) => setFilterType(event.target.value as 'income' | 'expense' | '')}
+              >
+                <option value="">Все типы</option>
+                <option value="expense">Расходы</option>
+                <option value="income">Доходы</option>
+              </select>
+            </div>
+            <div className="input-group">
+              <label htmlFor="filter_category">Категория</label>
+              <select
+                id="filter_category"
+                name="filter_category"
+                className="select"
+                value={filterCategoryId}
+                onChange={(event) => setFilterCategoryId(event.target.value)}
+              >
+                <option value="">Все категории</option>
+                {categories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.name}
+                    {category.is_archived ? ' · архив' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="input-group">
+              <label htmlFor="filter_account">Счёт</label>
+              <select
+                id="filter_account"
+                name="filter_account"
+                className="select"
+                value={filterAccountId}
+                onChange={(event) => setFilterAccountId(event.target.value)}
+              >
+                <option value="">Все счета</option>
+                {accounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.name} · {account.currency}
+                  </option>
+                ))}
+              </select>
             </div>
             <div className="input-group" style={{ alignSelf: 'flex-end' }}>
               <button type="submit" className="button" disabled={isTransactionsLoading}>
