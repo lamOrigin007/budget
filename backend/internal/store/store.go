@@ -45,14 +45,14 @@ func (s *Store) CreateUser(ctx context.Context, user *domain.User, passwordHash 
 }
 
 func (s *Store) CreateAccount(ctx context.Context, account *domain.Account) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO accounts (id, family_id, name, type, currency, balance_minor, is_archived, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		account.ID, account.FamilyID, account.Name, account.Type, account.Currency, account.BalanceMinor, account.IsArchived, account.CreatedAt, account.UpdatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO accounts (id, family_id, name, type, currency, balance_minor, is_shared, is_archived, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		account.ID, account.FamilyID, account.Name, account.Type, account.Currency, account.BalanceMinor, account.IsShared, account.IsArchived, account.CreatedAt, account.UpdatedAt)
 	return err
 }
 
 func (s *Store) ListAccountsByFamily(ctx context.Context, familyID string) ([]domain.Account, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, family_id, name, type, currency, balance_minor, is_archived, created_at, updated_at FROM accounts WHERE family_id = ? ORDER BY created_at`, familyID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, family_id, name, type, currency, balance_minor, is_shared, is_archived, created_at, updated_at FROM accounts WHERE family_id = ? ORDER BY created_at`, familyID)
 	if err != nil {
 		return nil, err
 	}
@@ -61,10 +61,12 @@ func (s *Store) ListAccountsByFamily(ctx context.Context, familyID string) ([]do
 	var accounts []domain.Account
 	for rows.Next() {
 		var account domain.Account
+		var isShared bool
 		var isArchived bool
-		if err := rows.Scan(&account.ID, &account.FamilyID, &account.Name, &account.Type, &account.Currency, &account.BalanceMinor, &isArchived, &account.CreatedAt, &account.UpdatedAt); err != nil {
+		if err := rows.Scan(&account.ID, &account.FamilyID, &account.Name, &account.Type, &account.Currency, &account.BalanceMinor, &isShared, &isArchived, &account.CreatedAt, &account.UpdatedAt); err != nil {
 			return nil, err
 		}
+		account.IsShared = isShared
 		account.IsArchived = isArchived
 		accounts = append(accounts, account)
 	}
@@ -72,17 +74,37 @@ func (s *Store) ListAccountsByFamily(ctx context.Context, familyID string) ([]do
 }
 
 func (s *Store) GetAccount(ctx context.Context, id string) (*domain.Account, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, family_id, name, type, currency, balance_minor, is_archived, created_at, updated_at FROM accounts WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, family_id, name, type, currency, balance_minor, is_shared, is_archived, created_at, updated_at FROM accounts WHERE id = ?`, id)
 	var account domain.Account
+	var isShared bool
 	var isArchived bool
-	if err := row.Scan(&account.ID, &account.FamilyID, &account.Name, &account.Type, &account.Currency, &account.BalanceMinor, &isArchived, &account.CreatedAt, &account.UpdatedAt); err != nil {
+	if err := row.Scan(&account.ID, &account.FamilyID, &account.Name, &account.Type, &account.Currency, &account.BalanceMinor, &isShared, &isArchived, &account.CreatedAt, &account.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
 	}
+	account.IsShared = isShared
 	account.IsArchived = isArchived
 	return &account, nil
+}
+
+func (s *Store) ListFamilyMembers(ctx context.Context, familyID string) ([]domain.FamilyMember, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, email, role FROM users WHERE family_id = ? ORDER BY created_at`, familyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var members []domain.FamilyMember
+	for rows.Next() {
+		var member domain.FamilyMember
+		if err := rows.Scan(&member.ID, &member.Name, &member.Email, &member.Role); err != nil {
+			return nil, err
+		}
+		members = append(members, member)
+	}
+	return members, rows.Err()
 }
 
 func (s *Store) FindUserByEmail(ctx context.Context, email string) (*domain.User, error) {
@@ -279,32 +301,41 @@ type TransactionListFilters struct {
 	Type       string
 	CategoryID string
 	AccountID  string
+	UserID     string
 }
 
-func (s *Store) ListTransactionsByUser(ctx context.Context, userID string, filters TransactionListFilters) ([]domain.Transaction, error) {
-	baseQuery := `SELECT id, family_id, user_id, account_id, category_id, type, amount_minor, currency, comment, occurred_at, created_at, updated_at FROM transactions WHERE user_id = ?`
-	args := []interface{}{userID}
+func (s *Store) ListTransactionsByFamily(ctx context.Context, familyID string, filters TransactionListFilters) ([]domain.TransactionWithAuthor, error) {
+	baseQuery := `SELECT t.id, t.family_id, t.user_id, t.account_id, t.category_id, t.type, t.amount_minor, t.currency, t.comment, t.occurred_at, t.created_at, t.updated_at,
+        u.id, u.name, u.email, u.role
+FROM transactions t
+JOIN users u ON u.id = t.user_id
+WHERE t.family_id = ?`
+	args := []interface{}{familyID}
 	if filters.Start != nil {
-		baseQuery += " AND occurred_at >= ?"
+		baseQuery += " AND t.occurred_at >= ?"
 		args = append(args, filters.Start.UTC())
 	}
 	if filters.End != nil {
-		baseQuery += " AND occurred_at <= ?"
+		baseQuery += " AND t.occurred_at <= ?"
 		args = append(args, filters.End.UTC())
 	}
 	if trimmed := strings.TrimSpace(filters.Type); trimmed != "" {
-		baseQuery += " AND LOWER(type) = ?"
+		baseQuery += " AND LOWER(t.type) = ?"
 		args = append(args, strings.ToLower(trimmed))
 	}
 	if trimmed := strings.TrimSpace(filters.CategoryID); trimmed != "" {
-		baseQuery += " AND category_id = ?"
+		baseQuery += " AND t.category_id = ?"
 		args = append(args, trimmed)
 	}
 	if trimmed := strings.TrimSpace(filters.AccountID); trimmed != "" {
-		baseQuery += " AND account_id = ?"
+		baseQuery += " AND t.account_id = ?"
 		args = append(args, trimmed)
 	}
-	baseQuery += " ORDER BY occurred_at DESC"
+	if trimmed := strings.TrimSpace(filters.UserID); trimmed != "" {
+		baseQuery += " AND t.user_id = ?"
+		args = append(args, trimmed)
+	}
+	baseQuery += " ORDER BY t.occurred_at DESC"
 
 	rows, err := s.db.QueryContext(ctx, baseQuery, args...)
 	if err != nil {
@@ -312,11 +343,12 @@ func (s *Store) ListTransactionsByUser(ctx context.Context, userID string, filte
 	}
 	defer rows.Close()
 
-	var txns []domain.Transaction
+	var txns []domain.TransactionWithAuthor
 	for rows.Next() {
-		var txn domain.Transaction
+		var txn domain.TransactionWithAuthor
 		var comment sql.NullString
-		if err := rows.Scan(&txn.ID, &txn.FamilyID, &txn.UserID, &txn.AccountID, &txn.CategoryID, &txn.Type, &txn.AmountMinor, &txn.Currency, &comment, &txn.OccurredAt, &txn.CreatedAt, &txn.UpdatedAt); err != nil {
+		if err := rows.Scan(&txn.ID, &txn.FamilyID, &txn.UserID, &txn.AccountID, &txn.CategoryID, &txn.Type, &txn.AmountMinor, &txn.Currency, &comment, &txn.OccurredAt, &txn.CreatedAt, &txn.UpdatedAt,
+			&txn.Author.ID, &txn.Author.Name, &txn.Author.Email, &txn.Author.Role); err != nil {
 			return nil, err
 		}
 		if comment.Valid {

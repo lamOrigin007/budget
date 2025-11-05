@@ -9,6 +9,13 @@ type Family struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+type FamilyMember struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Email string `json:"email"`
+	Role  string `json:"role"`
+}
+
 type User struct {
 	ID              string    `json:"id"`
 	FamilyID        string    `json:"family_id"`
@@ -28,6 +35,7 @@ type Account struct {
 	Type         string    `json:"type"`
 	Currency     string    `json:"currency"`
 	BalanceMinor int64     `json:"balance_minor"`
+	IsShared     bool      `json:"is_shared"`
 	IsArchived   bool      `json:"is_archived"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -45,6 +53,11 @@ type Category struct {
 	IsArchived  bool      `json:"is_archived"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type TransactionWithAuthor struct {
+	Transaction
+	Author FamilyMember `json:"author"`
 }
 
 type Transaction struct {

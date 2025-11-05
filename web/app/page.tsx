@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 
 function startOfCurrentMonth(): Date {
   const now = new Date();
@@ -38,6 +38,7 @@ import {
   AccountPayload,
   Category,
   CategoryPayload,
+  FamilyMember,
   RegisterResponse,
   Transaction
 } from '../src/lib/api';
@@ -49,7 +50,8 @@ import {
   createCategory,
   updateCategory,
   setCategoryArchived,
-  createAccount
+  createAccount,
+  fetchFamilyMembers
 } from '../src/lib/api';
 
 type Step = 'register' | 'dashboard';
@@ -68,6 +70,7 @@ export default function Home() {
   const [userData, setUserData] = useState<RegisterResponse | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [familyMembers, setFamilyMembers] = useState<FamilyMember[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -75,6 +78,7 @@ export default function Home() {
   const [isRegistering, setIsRegistering] = useState(false);
   const [isSavingTransaction, setIsSavingTransaction] = useState(false);
   const [isTransactionsLoading, setIsTransactionsLoading] = useState(false);
+  const [membersError, setMembersError] = useState<string | null>(null);
   const [isCategorySubmitting, setIsCategorySubmitting] = useState(false);
   const [categoryError, setCategoryError] = useState<string | null>(null);
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
@@ -98,17 +102,20 @@ export default function Home() {
     type: Account['type'];
     currency: string;
     initial_balance_minor: string;
+    shared: boolean;
   }>({
     name: '',
     type: 'cash',
     currency: '',
-    initial_balance_minor: ''
+    initial_balance_minor: '',
+    shared: true
   });
   const [periodStart, setPeriodStart] = useState(() => formatDateInput(startOfCurrentMonth()));
   const [periodEnd, setPeriodEnd] = useState(() => formatDateInput(new Date()));
   const [filterType, setFilterType] = useState<'income' | 'expense' | ''>('');
   const [filterCategoryId, setFilterCategoryId] = useState<string>('');
   const [filterAccountId, setFilterAccountId] = useState<string>('');
+  const [filterUserId, setFilterUserId] = useState<string>('');
 
   const activeCategories = useMemo(
     () => categories.filter((category) => !category.is_archived),
@@ -132,6 +139,21 @@ export default function Home() {
     }
   }, [accounts, filterAccountId]);
 
+  useEffect(() => {
+    if (filterUserId && !familyMembers.some((member) => member.id === filterUserId)) {
+      setFilterUserId('');
+    }
+  }, [familyMembers, filterUserId]);
+
+  useEffect(() => {
+    if (!userData) {
+      setFamilyMembers([]);
+      setMembersError(null);
+      return;
+    }
+    void refreshMembers(userData.user.id);
+  }, [refreshMembers, userData?.user.id]);
+
   function sortAccounts(list: Account[]) {
     return [...list].sort((left, right) => left.name.localeCompare(right.name, 'ru'));
   }
@@ -140,6 +162,32 @@ export default function Home() {
     const value = valueMinor / 100;
     return `${value.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
   }
+
+  function formatRole(role: string) {
+    switch (role) {
+      case 'owner':
+        return 'владелец';
+      case 'adult':
+        return 'участник';
+      case 'junior':
+        return 'гость';
+      default:
+        return role;
+    }
+  }
+
+  const refreshMembers = useCallback(
+    async (userId: string) => {
+      try {
+        const list = await fetchFamilyMembers(userId);
+        setFamilyMembers(list);
+        setMembersError(null);
+      } catch (error) {
+        setMembersError(error instanceof Error ? error.message : 'Не удалось загрузить участников семьи');
+      }
+    },
+    []
+  );
 
   async function refreshAccounts(userId: string, preferredAccountId?: string) {
     const list = sortAccounts(await fetchAccounts(userId));
@@ -178,7 +226,8 @@ export default function Home() {
         ...(endIso ? { end_date: endIso } : {}),
         ...(filterType ? { type: filterType } : {}),
         ...(filterCategoryId ? { category_id: filterCategoryId } : {}),
-        ...(filterAccountId ? { account_id: filterAccountId } : {})
+        ...(filterAccountId ? { account_id: filterAccountId } : {}),
+        ...(filterUserId ? { user_id: filterUserId } : {})
       });
       setTransactions(sortTransactions(tx));
     } catch (error) {
@@ -204,6 +253,9 @@ export default function Home() {
     if (filterAccountId && transaction.account_id !== filterAccountId) {
       return false;
     }
+    if (filterUserId && transaction.author.id !== filterUserId) {
+      return false;
+    }
     return true;
   }
 
@@ -219,9 +271,12 @@ export default function Home() {
         name: String(formData.get('name') ?? ''),
         currency: String(formData.get('currency') ?? 'RUB'),
         locale: String(formData.get('locale') ?? 'ru-RU'),
-        family_name: String(formData.get('family_name') ?? '')
+        family_name: String(formData.get('family_name') ?? ''),
+        family_id: String(formData.get('family_id') ?? '')
       });
       setUserData(response);
+      setFamilyMembers(response.members);
+      setMembersError(null);
       setCategories(sortCategories(response.categories));
       await refreshAccounts(response.user.id);
       setAccountForm((prev) => ({
@@ -229,6 +284,7 @@ export default function Home() {
         currency: response.user.currency_default
       }));
       await loadTransactionsForCurrentPeriod(response.user.id);
+      await refreshMembers(response.user.id);
       setStep('dashboard');
       event.currentTarget.reset();
     } catch (error) {
@@ -347,7 +403,8 @@ export default function Home() {
 
     const payload: AccountPayload = {
       name: accountForm.name.trim(),
-      type: accountForm.type
+      type: accountForm.type,
+      shared: accountForm.shared
     };
     const currency = accountForm.currency.trim();
     if (currency) {
@@ -365,7 +422,8 @@ export default function Home() {
         name: '',
         type: 'cash',
         currency: account.currency,
-        initial_balance_minor: ''
+        initial_balance_minor: '',
+        shared: true
       });
     } catch (error) {
       setAccountError(error instanceof Error ? error.message : 'Не удалось создать счёт');
@@ -441,9 +499,19 @@ export default function Home() {
               <label htmlFor="family_name">Название семьи</label>
               <input id="family_name" name="family_name" placeholder="Семья Ивановых" className="input" />
             </div>
+            <div className="input-group">
+              <label htmlFor="family_id">ID существующей семьи</label>
+              <input
+                id="family_id"
+                name="family_id"
+                placeholder="Введите UUID, чтобы присоединиться"
+                className="input"
+              />
+              <p className="meta">Оставьте поле пустым, если создаёте новую семью.</p>
+            </div>
             {registerError && <p className="error">{registerError}</p>}
             <button type="submit" disabled={isRegistering} className="button">
-              {isRegistering ? 'Создание...' : 'Создать семью'}
+              {isRegistering ? 'Создание...' : 'Создать или присоединиться'}
             </button>
           </form>
         </div>
@@ -468,6 +536,30 @@ export default function Home() {
         <p className="highlight">
           Активные статьи бюджета: {activeCategories.map((category) => category.name).join(', ') || 'добавьте первую категорию'}
         </p>
+        <div style={{ marginTop: '1.25rem' }}>
+          <h3 style={{ fontSize: '1rem', marginBottom: '0.5rem' }}>Участники семьи</h3>
+          {membersError && <p className="error">{membersError}</p>}
+          {familyMembers.length === 0 ? (
+            <p className="highlight">Пригласите родственников, чтобы делиться общим бюджетом.</p>
+          ) : (
+            <ul className="transactions">
+              {familyMembers.map((member) => {
+                const isCurrent = member.id === userData?.user.id;
+                return (
+                  <li key={member.id} className="transaction-item" style={{ alignItems: 'flex-start' }}>
+                    <div>
+                      <p style={{ fontWeight: 600, color: '#e2e8f0' }}>
+                        {member.name} {isCurrent ? '· это вы' : ''}
+                      </p>
+                      <p className="meta">{member.email}</p>
+                      <p className="meta">Роль: {formatRole(member.role)}</p>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
       </section>
 
       <section className="panel">
@@ -491,6 +583,7 @@ export default function Home() {
                         <p style={{ fontWeight: 600, color: '#e2e8f0' }}>{account.name}</p>
                         <p className="meta">{accountTypeLabels[account.type]}</p>
                         <p className="meta">Валюта: {account.currency}</p>
+                        <p className="meta">{account.is_shared ? 'Общий счёт семьи' : 'Личный счёт'}</p>
                         {isSelected && <p className="highlight">Активный счёт для новых операций</p>}
                       </div>
                       <div className="amount" style={{ color: balanceColor }}>
@@ -555,6 +648,19 @@ export default function Home() {
                 onChange={(event) => setAccountForm((prev) => ({ ...prev, initial_balance_minor: event.target.value }))}
                 placeholder="0"
               />
+            </div>
+            <div className="input-group" style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+              <label htmlFor="account_shared" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <input
+                  id="account_shared"
+                  name="account_shared"
+                  type="checkbox"
+                  checked={accountForm.shared}
+                  onChange={(event) => setAccountForm((prev) => ({ ...prev, shared: event.target.checked }))}
+                />
+                Общий счёт семьи
+              </label>
+              <span className="meta">Снимите флажок, чтобы сделать счёт личным.</span>
             </div>
             {accountError && <p className="error" style={{ gridColumn: '1 / -1' }}>{accountError}</p>}
             <button type="submit" className="button" disabled={isAccountSubmitting} style={{ gridColumn: '1 / -1' }}>
@@ -791,6 +897,23 @@ export default function Home() {
                 ))}
               </select>
             </div>
+            <div className="input-group">
+              <label htmlFor="filter_user">Участник</label>
+              <select
+                id="filter_user"
+                name="filter_user"
+                className="select"
+                value={filterUserId}
+                onChange={(event) => setFilterUserId(event.target.value)}
+              >
+                <option value="">Все участники</option>
+                {familyMembers.map((member) => (
+                  <option key={member.id} value={member.id}>
+                    {member.name} · {formatRole(member.role)}
+                  </option>
+                ))}
+              </select>
+            </div>
             <div className="input-group" style={{ alignSelf: 'flex-end' }}>
               <button type="submit" className="button" disabled={isTransactionsLoading}>
                 {isTransactionsLoading ? 'Загрузка...' : 'Обновить период'}
@@ -815,6 +938,10 @@ export default function Home() {
                     <p style={{ fontWeight: 600, color: category?.color ?? '#e2e8f0' }}>{category?.name ?? 'Категория'}</p>
                     <p className="meta">{new Date(transaction.occurred_at).toLocaleString()}</p>
                     <p className="meta">Счёт: {account?.name ?? 'недоступно'}</p>
+                    <p className="meta">
+                      Автор: {transaction.author.name}
+                      {transaction.author.id === userData?.user.id ? ' · это вы' : ''} ({formatRole(transaction.author.role)})
+                    </p>
                     {transaction.comment && (
                       <p className="highlight" style={{ color: '#e2e8f0', marginTop: '0.35rem' }}>{transaction.comment}</p>
                     )}

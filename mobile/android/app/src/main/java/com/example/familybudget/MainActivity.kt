@@ -17,6 +17,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.Divider
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -48,6 +50,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     private val client = HttpClient(OkHttp) {
@@ -75,12 +81,16 @@ fun BudgetScreen(client: HttpClient) {
     var password by remember { mutableStateOf("") }
     var name by remember { mutableStateOf("") }
     var familyName by remember { mutableStateOf("") }
+    var familyId by remember { mutableStateOf("") }
     var currency by remember { mutableStateOf("RUB") }
     var status by remember { mutableStateOf("Создайте владельца семьи") }
     var user by remember { mutableStateOf<User?>(null) }
     var family by remember { mutableStateOf<Family?>(null) }
     var categories by remember { mutableStateOf(listOf<Category>()) }
     var accounts by remember { mutableStateOf(listOf<Account>()) }
+    var familyMembers by remember { mutableStateOf(listOf<FamilyMember>()) }
+    var membersMessage by remember { mutableStateOf("") }
+    var isMembersLoading by remember { mutableStateOf(false) }
     var categoryName by remember { mutableStateOf("") }
     var categoryType by remember { mutableStateOf("expense") }
     var categoryColor by remember { mutableStateOf("#0EA5E9") }
@@ -93,8 +103,13 @@ fun BudgetScreen(client: HttpClient) {
     var accountType by remember { mutableStateOf("cash") }
     var accountCurrency by remember { mutableStateOf("") }
     var accountInitial by remember { mutableStateOf("") }
+    var accountShared by remember { mutableStateOf(true) }
     var accountMessage by remember { mutableStateOf("") }
     var isAccountLoading by remember { mutableStateOf(false) }
+    var transactions by remember { mutableStateOf(listOf<Transaction>()) }
+    var transactionsMessage by remember { mutableStateOf("") }
+    var isTransactionsLoading by remember { mutableStateOf(false) }
+    var transactionMemberFilter by remember { mutableStateOf<String?>(null) }
 
     fun register() {
         CoroutineScope(Dispatchers.IO).launch {
@@ -107,7 +122,8 @@ fun BudgetScreen(client: HttpClient) {
                             name = name,
                             locale = "ru-RU",
                             currency = currency,
-                            familyName = familyName
+                            familyName = familyName,
+                            familyId = familyId.ifBlank { null }
                         )
                     )
                 }.body()
@@ -117,9 +133,16 @@ fun BudgetScreen(client: HttpClient) {
                     status = "Профиль создан для ${'$'}{response.user.name}"
                     accounts = response.accounts
                     accountCurrency = response.user.currencyDefault
+                    familyMembers = response.members
+                    membersMessage = ""
+                    familyId = ""
+                    transactionMemberFilter = null
+                    accountShared = true
                 }
                 loadCategories(response.user.id)
                 loadAccounts(response.user.id)
+                loadMembers(response.user.id)
+                loadTransactions(response.user.id, null)
             } catch (ex: Exception) {
                 withContext(Dispatchers.Main) {
                     status = "Ошибка: ${'$'}{ex.message}"
@@ -153,6 +176,59 @@ fun BudgetScreen(client: HttpClient) {
             } catch (ex: Exception) {
                 withContext(Dispatchers.Main) {
                     accountMessage = "Не удалось загрузить счета: ${'$'}{ex.message}"
+                }
+            }
+        }
+    }
+
+    fun loadMembers(userId: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            withContext(Dispatchers.Main) {
+                isMembersLoading = true
+                membersMessage = ""
+            }
+            try {
+                val list: MemberList = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/members").body()
+                withContext(Dispatchers.Main) {
+                    familyMembers = list.members.sortedBy { it.name }
+                    isMembersLoading = false
+                    if (transactionMemberFilter != null && list.members.none { it.id == transactionMemberFilter }) {
+                        transactionMemberFilter = null
+                        user?.let { loadTransactions(it.id, null) }
+                    }
+                }
+            } catch (ex: Exception) {
+                withContext(Dispatchers.Main) {
+                    membersMessage = "Не удалось загрузить участников: ${'$'}{ex.message}"
+                    isMembersLoading = false
+                }
+            }
+        }
+    }
+
+    fun loadTransactions(userId: String, memberId: String?) {
+        CoroutineScope(Dispatchers.IO).launch {
+            withContext(Dispatchers.Main) {
+                isTransactionsLoading = true
+                transactionsMessage = ""
+            }
+            try {
+                val response: TransactionList = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/transactions") {
+                    if (!memberId.isNullOrBlank()) {
+                        url.parameters.append("user_id", memberId)
+                    }
+                }.body()
+                withContext(Dispatchers.Main) {
+                    transactions = response.transactions.sortedByDescending { it.occurredAt }
+                    isTransactionsLoading = false
+                    if (transactions.isEmpty()) {
+                        transactionsMessage = "Нет операций в выбранном фильтре"
+                    }
+                }
+            } catch (ex: Exception) {
+                withContext(Dispatchers.Main) {
+                    transactionsMessage = "Не удалось загрузить операции: ${'$'}{ex.message}"
+                    isTransactionsLoading = false
                 }
             }
         }
@@ -227,7 +303,8 @@ fun BudgetScreen(client: HttpClient) {
                 name = accountName.trim(),
                 type = accountType,
                 currency = if (trimmedCurrency.isBlank()) null else trimmedCurrency,
-                initialBalanceMinor = initialMinor
+                initialBalanceMinor = initialMinor,
+                shared = accountShared
             )
             try {
                 val response: AccountResponse = client.post("http://10.0.2.2:8080/api/v1/users/${'$'}{currentUser.id}/accounts") {
@@ -239,6 +316,7 @@ fun BudgetScreen(client: HttpClient) {
                     accountInitial = ""
                     accountCurrency = response.account.currency
                     accountType = "cash"
+                    accountShared = true
                     accountMessage = "Счёт создан"
                 }
                 loadAccounts(currentUser.id)
@@ -329,12 +407,63 @@ fun BudgetScreen(client: HttpClient) {
                             modifier = Modifier.weight(1f)
                         )
                     }
-                    Button(onClick = { register() }, enabled = email.isNotBlank() && password.isNotBlank() && name.isNotBlank()) {
-                        Text("Создать семью")
+                    OutlinedTextField(
+                        value = familyId,
+                        onValueChange = { familyId = it },
+                        label = { Text("ID семьи для подключения") },
+                        placeholder = { Text("Оставьте пустым, чтобы создать новую") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Button(
+                        onClick = { register() },
+                        enabled = email.isNotBlank() && password.isNotBlank() && name.isNotBlank()
+                    ) {
+                        Text("Создать или присоединиться")
                     }
                 }
             }
             if (user != null) {
+                Spacer(modifier = Modifier.height(16.dp))
+                MembersSection(
+                    members = familyMembers,
+                    message = membersMessage,
+                    isLoading = isMembersLoading,
+                    onRefresh = { loadMembers(user!!.id) }
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                AccountsManager(
+                    accounts = accounts,
+                    accountName = accountName,
+                    accountType = accountType,
+                    accountCurrency = accountCurrency,
+                    accountInitial = accountInitial,
+                    accountShared = accountShared,
+                    message = accountMessage,
+                    isLoading = isAccountLoading,
+                    onNameChange = { accountName = it },
+                    onTypeChange = { accountType = it },
+                    onCurrencyChange = { accountCurrency = it.uppercase() },
+                    onInitialChange = { accountInitial = it },
+                    onSharedChange = { accountShared = it },
+                    onCreate = { createAccount() }
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                TransactionsSection(
+                    transactions = transactions,
+                    categories = categories,
+                    accounts = accounts,
+                    members = familyMembers,
+                    selectedMember = transactionMemberFilter,
+                    isLoading = isTransactionsLoading,
+                    message = transactionsMessage,
+                    onMemberSelected = { memberId ->
+                        transactionMemberFilter = memberId
+                        user?.let { loadTransactions(it.id, memberId) }
+                    },
+                    onRefresh = {
+                        user?.let { loadTransactions(it.id, transactionMemberFilter) }
+                    }
+                )
                 Spacer(modifier = Modifier.height(16.dp))
                 CategoryManager(
                     categories = categories,
@@ -363,23 +492,117 @@ fun BudgetScreen(client: HttpClient) {
                     },
                     onArchive = { category, archived -> archiveCategory(category, archived) }
                 )
-                Spacer(modifier = Modifier.height(16.dp))
-                AccountsManager(
-                    accounts = accounts,
-                    accountName = accountName,
-                    accountType = accountType,
-                    accountCurrency = accountCurrency,
-                    accountInitial = accountInitial,
-                    message = accountMessage,
-                    isLoading = isAccountLoading,
-                    onNameChange = { accountName = it },
-                    onTypeChange = { accountType = it },
-                    onCurrencyChange = { accountCurrency = it.uppercase() },
-                    onInitialChange = { accountInitial = it },
-                    onCreate = { createAccount() }
-                )
             }
             Spacer(modifier = Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun MembersSection(
+    members: List<FamilyMember>,
+    message: String,
+    isLoading: Boolean,
+    onRefresh: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                Text("Участники семьи", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                OutlinedButton(onClick = onRefresh, enabled = !isLoading) { Text("Обновить") }
+            }
+            if (isLoading) {
+                Text("Загрузка участников...", style = MaterialTheme.typography.bodySmall)
+            }
+            if (message.isNotEmpty()) {
+                Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+            if (!isLoading && members.isEmpty() && message.isEmpty()) {
+                Text("Пригласите родственников, чтобы вести общий бюджет.", style = MaterialTheme.typography.bodySmall)
+            }
+            members.forEach { member ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(member.name, fontWeight = FontWeight.SemiBold)
+                        Text(member.email, style = MaterialTheme.typography.bodySmall)
+                        Text("Роль: ${roleTitle(member.role)}", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TransactionsSection(
+    transactions: List<Transaction>,
+    categories: List<Category>,
+    accounts: List<Account>,
+    members: List<FamilyMember>,
+    selectedMember: String?,
+    isLoading: Boolean,
+    message: String,
+    onMemberSelected: (String?) -> Unit,
+    onRefresh: () -> Unit
+) {
+    val categoriesMap = remember(categories) { categories.associateBy { it.id } }
+    val accountsMap = remember(accounts) { accounts.associateBy { it.id } }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                Text("Операции семьи", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                OutlinedButton(onClick = onRefresh, enabled = !isLoading) { Text("Обновить") }
+            }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (selectedMember == null) {
+                    Button(onClick = { onMemberSelected(null) }) { Text("Все участники") }
+                } else {
+                    OutlinedButton(onClick = { onMemberSelected(null) }) { Text("Все участники") }
+                }
+                members.forEach { member ->
+                    val isSelected = member.id == selectedMember
+                    if (isSelected) {
+                        Button(onClick = { onMemberSelected(member.id) }) { Text(member.name) }
+                    } else {
+                        OutlinedButton(onClick = { onMemberSelected(member.id) }) { Text(member.name) }
+                    }
+                }
+            }
+            if (isLoading) {
+                Text("Загрузка операций...", style = MaterialTheme.typography.bodySmall)
+            }
+            if (message.isNotEmpty()) {
+                val color = if (message.startsWith("Не удалось")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary
+                Text(message, style = MaterialTheme.typography.bodySmall, color = color)
+            }
+            if (!isLoading && transactions.isEmpty() && message.isEmpty()) {
+                Text("Добавьте первую операцию, чтобы увидеть историю.", style = MaterialTheme.typography.bodySmall)
+            }
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(transactions) { transaction ->
+                    val category = categoriesMap[transaction.categoryId]
+                    val account = accountsMap[transaction.accountId]
+                    val amount = transaction.amountMinor / 100.0
+                    val amountColor = if (transaction.type == "income") MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.error
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(category?.name ?: "Категория", fontWeight = FontWeight.SemiBold)
+                            Text("${formatDateTime(transaction.occurredAt)} · Счёт: ${account?.name ?: "неизвестно"}", style = MaterialTheme.typography.bodySmall)
+                            Text("Автор: ${transaction.author.name} (${roleTitle(transaction.author.role)})", style = MaterialTheme.typography.bodySmall)
+                            Text(
+                                text = String.format("%s%.2f %s", if (transaction.type == "income") "+" else "-", amount, transaction.currency),
+                                color = amountColor,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            transaction.comment?.takeIf { it.isNotBlank() }?.let {
+                                Text(it, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -552,12 +775,14 @@ private fun AccountsManager(
     accountType: String,
     accountCurrency: String,
     accountInitial: String,
+    accountShared: Boolean,
     message: String,
     isLoading: Boolean,
     onNameChange: (String) -> Unit,
     onTypeChange: (String) -> Unit,
     onCurrencyChange: (String) -> Unit,
     onInitialChange: (String) -> Unit,
+    onSharedChange: (Boolean) -> Unit,
     onCreate: () -> Unit
 ) {
     val typeOptions = listOf(
@@ -612,6 +837,13 @@ private fun AccountsManager(
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = androidx.compose.ui.text.input.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number)
             )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = accountShared, onCheckedChange = onSharedChange)
+                Column(modifier = Modifier.padding(start = 8.dp)) {
+                    Text("Общий счёт семьи", style = MaterialTheme.typography.bodyMedium)
+                    Text("Снимите флажок, чтобы сделать счёт личным.", style = MaterialTheme.typography.bodySmall)
+                }
+            }
             Button(onClick = onCreate, enabled = !isLoading && accountName.isNotBlank()) {
                 Text("Создать счёт")
             }
@@ -642,11 +874,32 @@ private fun AccountRow(account: Account) {
                 text = String.format("Баланс: %.2f %s", amount, account.currency),
                 style = MaterialTheme.typography.bodySmall
             )
+            Text(
+                text = if (account.isShared) "Общий счёт семьи" else "Личный счёт",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.secondary
+            )
             if (account.isArchived) {
                 Text("Счёт в архиве", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             }
         }
     }
+}
+
+private fun roleTitle(role: String): String = when (role) {
+    "owner" -> "Владелец"
+    "adult" -> "Участник"
+    "junior" -> "Гость"
+    else -> role
+}
+
+private val transactionFormatter: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("dd MMM HH:mm").withLocale(Locale("ru")).withZone(ZoneId.systemDefault())
+
+private fun formatDateTime(value: String): String = try {
+    transactionFormatter.format(Instant.parse(value))
+} catch (_: Exception) {
+    value
 }
 
 @Serializable
@@ -730,6 +983,7 @@ private data class Account(
     val type: String,
     val currency: String,
     @SerialName("balance_minor") val balanceMinor: Long,
+    @SerialName("is_shared") val isShared: Boolean,
     @SerialName("is_archived") val isArchived: Boolean,
     @SerialName("created_at") val createdAt: String,
     @SerialName("updated_at") val updatedAt: String
@@ -740,10 +994,46 @@ private data class AccountPayload(
     val name: String,
     val type: String,
     val currency: String? = null,
-    @SerialName("initial_balance_minor") val initialBalanceMinor: Long? = null
+    @SerialName("initial_balance_minor") val initialBalanceMinor: Long? = null,
+    val shared: Boolean? = null
 )
 
 @Serializable
 private data class AccountResponse(
     val account: Account
+)
+
+@Serializable
+private data class MemberList(
+    val members: List<FamilyMember>
+)
+
+@Serializable
+private data class FamilyMember(
+    val id: String,
+    val name: String,
+    val email: String,
+    val role: String
+)
+
+@Serializable
+private data class TransactionList(
+    val transactions: List<Transaction>
+)
+
+@Serializable
+private data class Transaction(
+    val id: String,
+    @SerialName("family_id") val familyId: String,
+    @SerialName("user_id") val userId: String,
+    @SerialName("account_id") val accountId: String,
+    @SerialName("category_id") val categoryId: String,
+    val type: String,
+    @SerialName("amount_minor") val amountMinor: Long,
+    val currency: String,
+    val comment: String? = null,
+    @SerialName("occurred_at") val occurredAt: String,
+    @SerialName("created_at") val createdAt: String,
+    @SerialName("updated_at") val updatedAt: String,
+    val author: FamilyMember
 )
