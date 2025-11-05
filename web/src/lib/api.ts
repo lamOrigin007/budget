@@ -5,6 +5,7 @@ export interface RegisterRequest {
   locale?: string;
   currency: string;
   family_name?: string;
+  family_id?: string;
 }
 
 export interface User {
@@ -47,9 +48,17 @@ export interface Account {
   type: 'cash' | 'card' | 'bank' | 'deposit' | 'wallet';
   currency: string;
   balance_minor: number;
+  is_shared: boolean;
   is_archived: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface FamilyMember {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
 }
 
 export interface CategoryPayload {
@@ -77,6 +86,7 @@ export interface Transaction {
   occurred_at: string;
   created_at: string;
   updated_at: string;
+  author: FamilyMember;
 }
 
 export interface RegisterResponse {
@@ -84,6 +94,7 @@ export interface RegisterResponse {
   family: Family;
   categories: Category[];
   accounts: Account[];
+  members: FamilyMember[];
 }
 
 export interface TransactionRequest {
@@ -102,6 +113,7 @@ export interface AccountPayload {
   type: 'cash' | 'card' | 'bank' | 'deposit' | 'wallet';
   currency?: string;
   initial_balance_minor?: number;
+  shared?: boolean;
 }
 
 export interface TransactionFilters {
@@ -213,4 +225,9 @@ export async function fetchTransactions(userId: string, filters?: TransactionFil
   const url = `/api/v1/users/${userId}/transactions${query ? `?${query}` : ''}`;
   const data = await request<{ transactions: Transaction[] }>(url);
   return data.transactions;
+}
+
+export async function fetchFamilyMembers(userId: string): Promise<FamilyMember[]> {
+  const data = await request<{ members: FamilyMember[] }>(`/api/v1/users/${userId}/members`);
+  return data.members;
 }

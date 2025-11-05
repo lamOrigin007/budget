@@ -41,12 +41,16 @@ struct ContentView: View {
     @State private var password = ""
     @State private var name = ""
     @State private var familyName = ""
+    @State private var familyIdInput = ""
     @State private var currency = "RUB"
     @State private var status = "Создайте владельца семьи"
     @State private var user: User? = nil
     @State private var family: Family? = nil
     @State private var categories: [Category] = []
     @State private var accounts: [Account] = []
+    @State private var familyMembers: [FamilyMember] = []
+    @State private var isMembersLoading = false
+    @State private var membersMessage = ""
     @State private var isLoading = false
     @State private var categoryName = ""
     @State private var categoryType: CategoryType = .expense
@@ -62,6 +66,7 @@ struct ContentView: View {
     @State private var accountInitialAmount = ""
     @State private var accountMessage = ""
     @State private var isSavingAccount = false
+    @State private var accountShared = true
     @State private var transactions: [Transaction] = []
     @State private var transactionType: TransactionKind = .expense
     @State private var transactionCategoryId: String = ""
@@ -111,12 +116,18 @@ struct ContentView: View {
                 TextField("Семья", text: $familyName)
                     .textFieldStyle(.roundedBorder)
             }
+            TextField("ID семьи (опционально)", text: $familyIdInput)
+                .textFieldStyle(.roundedBorder)
+                .textInputAutocapitalization(.never)
+                .textContentType(.oneTimeCode)
+            Text("Оставьте поле пустым, чтобы создать новую семью", style: .footnote)
+                .foregroundColor(.secondary)
             Button(action: register) {
                 HStack {
                     if isLoading {
                         ProgressView()
                     }
-                    Text("Создать семью")
+                    Text("Создать или присоединиться")
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -141,6 +152,7 @@ struct ContentView: View {
                                 .foregroundColor(.secondary)
                         }
                     }
+                    membersSection(userId: user.id)
                     accountsSection(userId: user.id)
                     categoryForm(userId: user.id)
                     categoryLists(userId: user.id)
@@ -175,7 +187,8 @@ struct ContentView: View {
             name: name,
             locale: "ru-RU",
             currency: currency,
-            familyName: familyName.isEmpty ? nil : familyName
+            familyName: familyName.isEmpty ? nil : familyName,
+            familyId: familyIdInput.isEmpty ? nil : familyIdInput
         )
 
         request.httpBody = try? JSONEncoder().encode(payload)
@@ -207,11 +220,16 @@ struct ContentView: View {
                 accounts = registerResponse.accounts.sorted { $0.createdAt < $1.createdAt }
                 ensureTransactionAccountSelection()
                 accountCurrencyInput = registerResponse.user.currencyDefault
+                familyMembers = registerResponse.members.sorted { $0.name < $1.name }
+                membersMessage = ""
+                familyIdInput = ""
+                accountShared = true
                 refreshTransactionsForCurrentPeriod()
             }
 
             loadCategories(userId: registerResponse.user.id)
             loadAccounts(userId: registerResponse.user.id)
+            loadMembers(userId: registerResponse.user.id)
         }.resume()
     }
 
@@ -246,6 +264,85 @@ struct ContentView: View {
                 ensureTransactionAccountSelection()
             }
         }.resume()
+    }
+
+    private func loadMembers(userId: String) {
+        guard let url = URL(string: "http://localhost:8080/api/v1/users/\(userId)/members") else { return }
+        DispatchQueue.main.async {
+            isMembersLoading = true
+            membersMessage = ""
+        }
+        URLSession.shared.dataTask(with: url) { data, _, error in
+            DispatchQueue.main.async {
+                isMembersLoading = false
+            }
+            if let error = error {
+                DispatchQueue.main.async {
+                    membersMessage = "Не удалось загрузить участников: \(error.localizedDescription)"
+                }
+                return
+            }
+            guard
+                let data = data,
+                let response = try? JSONDecoder().decode(MemberList.self, from: data)
+            else {
+                DispatchQueue.main.async {
+                    membersMessage = "Некорректный ответ сервера при загрузке участников"
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                familyMembers = response.members.sorted { $0.name < $1.name }
+                if !transactionFilterUserId.isEmpty,
+                   !familyMembers.contains(where: { $0.id == transactionFilterUserId }) {
+                    transactionFilterUserId = ""
+                    refreshTransactionsForCurrentPeriod()
+                }
+            }
+        }.resume()
+    }
+
+    private func membersSection(userId: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Участники семьи")
+                    .font(.headline)
+                Spacer()
+                Button("Обновить") {
+                    loadMembers(userId: userId)
+                }
+                .buttonStyle(.bordered)
+                .disabled(isMembersLoading)
+            }
+            if isMembersLoading {
+                ProgressView()
+            }
+            if !membersMessage.isEmpty {
+                Text(membersMessage)
+                    .font(.footnote)
+                    .foregroundColor(.red)
+            }
+            if !isMembersLoading && familyMembers.isEmpty && membersMessage.isEmpty {
+                Text("Пригласите родственников, чтобы делиться общим бюджетом.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+            ForEach(familyMembers) { member in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(member.name)
+                        .fontWeight(.semibold)
+                    Text(member.email)
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                    Text("Роль: \(member.roleTitle)")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+                .padding()
+                .background(Color.gray.opacity(0.1))
+                .cornerRadius(12)
+            }
+        }
     }
 
     private func saveCategory(for userId: String) {
@@ -378,7 +475,8 @@ struct ContentView: View {
             name: trimmedName,
             type: accountTypeSelection.rawValue,
             currency: trimmedCurrency.isEmpty ? nil : trimmedCurrency,
-            initialBalanceMinor: initialValue != 0 ? initialValue : nil
+            initialBalanceMinor: initialValue != 0 ? initialValue : nil,
+            shared: accountShared
         )
 
         request.httpBody = try? JSONEncoder().encode(payload)
@@ -410,6 +508,7 @@ struct ContentView: View {
                 accountInitialAmount = ""
                 accountCurrencyInput = response.account.currency
                 accountTypeSelection = .cash
+                accountShared = true
                 accountMessage = "Счёт добавлен"
                 loadAccounts(userId: userId)
                 transactionAccountId = response.account.id
@@ -446,6 +545,9 @@ struct ContentView: View {
         }
         if !transactionFilterAccountId.isEmpty {
             queryItems.append(URLQueryItem(name: "account_id", value: transactionFilterAccountId))
+        }
+        if !transactionFilterUserId.isEmpty {
+            queryItems.append(URLQueryItem(name: "user_id", value: transactionFilterUserId))
         }
         components.queryItems = queryItems
 
@@ -573,6 +675,9 @@ struct ContentView: View {
         if !transactionFilterAccountId.isEmpty, transaction.accountId != transactionFilterAccountId {
             return false
         }
+        if !transactionFilterUserId.isEmpty, transaction.author.id != transactionFilterUserId {
+            return false
+        }
         return true
     }
 
@@ -638,6 +743,11 @@ struct ContentView: View {
             TextField("Начальный баланс (в минорных единицах)", text: $accountInitialAmount)
                 .textFieldStyle(.roundedBorder)
                 .keyboardType(.numberPad)
+
+            Toggle("Общий счёт семьи", isOn: $accountShared)
+            Text("Снимите флажок, чтобы сделать счёт личным.")
+                .font(.footnote)
+                .foregroundColor(.secondary)
 
             Button(action: { saveAccount(for: userId) }) {
                 if isSavingAccount {
@@ -817,6 +927,12 @@ struct ContentView: View {
                     Text("\(account.name) · \(account.currency)").tag(account.id)
                 }
             }
+            Picker("Участник", selection: $transactionFilterUserId) {
+                Text("Все участники").tag("")
+                ForEach(familyMembers) { member in
+                    Text("\(member.name) · \(member.roleTitle)").tag(member.id)
+                }
+            }
             Button(action: refreshTransactionsForCurrentPeriod) {
                 if isLoadingTransactions {
                     ProgressView()
@@ -934,6 +1050,9 @@ struct ContentView: View {
                 Text(account.localizedType)
                     .font(.footnote)
                     .foregroundColor(.secondary)
+                Text(account.isShared ? "Общий счёт семьи" : "Личный счёт")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
                 if isSelected {
                     Label("Используется для операций", systemImage: "checkmark.circle.fill")
                         .font(.footnote)
@@ -973,6 +1092,9 @@ struct ContentView: View {
             Text("Счёт: \(accountName)")
                 .font(.caption)
                 .foregroundColor(.secondary)
+            Text("Автор: \(transaction.author.name) · \(transaction.author.roleTitle)")
+                .font(.caption)
+                .foregroundColor(.secondary)
             if let comment, !comment.isEmpty {
                 Text(comment)
                     .font(.footnote)
@@ -1006,10 +1128,12 @@ private struct RegisterRequest: Codable {
     let locale: String
     let currency: String
     let familyName: String?
+    let familyId: String?
 
     enum CodingKeys: String, CodingKey {
         case email, password, name, locale, currency
         case familyName = "family_name"
+        case familyId = "family_id"
     }
 }
 
@@ -1017,6 +1141,7 @@ private struct RegisterResponse: Codable {
     let user: User
     let family: Family
     let accounts: [Account]
+    let members: [FamilyMember]
 }
 
 private struct User: Codable {
@@ -1102,6 +1227,7 @@ private struct Account: Codable, Identifiable {
     let type: String
     let currency: String
     let balanceMinor: Int64
+    let isShared: Bool
     let isArchived: Bool
     let createdAt: String
     let updatedAt: String
@@ -1113,6 +1239,7 @@ private struct Account: Codable, Identifiable {
         case type
         case currency
         case balanceMinor = "balance_minor"
+        case isShared = "is_shared"
         case isArchived = "is_archived"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
@@ -1147,9 +1274,10 @@ private struct AccountPayload: Codable {
     let type: String
     let currency: String?
     let initialBalanceMinor: Int64?
+    let shared: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case name, type, currency
+        case name, type, currency, shared
         case initialBalanceMinor = "initial_balance_minor"
     }
 }
@@ -1164,6 +1292,26 @@ private struct CategoryArchiveRequest: Codable {
 
 private struct AccountResponse: Codable {
     let account: Account
+}
+
+private struct MemberList: Codable {
+    let members: [FamilyMember]
+}
+
+private struct FamilyMember: Codable, Identifiable {
+    let id: String
+    let name: String
+    let email: String
+    let role: String
+
+    var roleTitle: String {
+        switch role {
+        case "owner": return "Владелец"
+        case "adult": return "Участник"
+        case "junior": return "Гость"
+        default: return role
+        }
+    }
 }
 
 private enum CategoryType: String, CaseIterable {
@@ -1273,6 +1421,7 @@ private struct Transaction: Decodable, Identifiable {
     let occurredAt: Date
     let createdAt: Date
     let updatedAt: Date
+    let author: FamilyMember
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -1287,6 +1436,7 @@ private struct Transaction: Decodable, Identifiable {
         case occurredAt = "occurred_at"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case author
     }
 
     init(from decoder: Decoder) throws {
@@ -1300,6 +1450,7 @@ private struct Transaction: Decodable, Identifiable {
         amountMinor = try container.decode(Int64.self, forKey: .amountMinor)
         currency = try container.decode(String.self, forKey: .currency)
         comment = try container.decodeIfPresent(String.self, forKey: .comment)
+        author = try container.decode(FamilyMember.self, forKey: .author)
 
         func decodeDate(_ key: CodingKeys) throws -> Date {
             let value = try container.decode(String.self, forKey: key)

@@ -32,13 +32,15 @@ type RegisterRequest struct {
 	Locale     string `json:"locale"`
 	Currency   string `json:"currency"`
 	FamilyName string `json:"family_name"`
+	FamilyID   string `json:"family_id"`
 }
 
 type RegisterResponse struct {
-	User       domain.User       `json:"user"`
-	Family     domain.Family     `json:"family"`
-	Categories []domain.Category `json:"categories"`
-	Accounts   []domain.Account  `json:"accounts"`
+	User       domain.User           `json:"user"`
+	Family     domain.Family         `json:"family"`
+	Categories []domain.Category     `json:"categories"`
+	Accounts   []domain.Account      `json:"accounts"`
+	Members    []domain.FamilyMember `json:"members"`
 }
 
 type CategoryRequest struct {
@@ -69,7 +71,7 @@ type TransactionRequest struct {
 }
 
 type transactionResponse struct {
-	Transaction domain.Transaction `json:"transaction"`
+	Transaction domain.TransactionWithAuthor `json:"transaction"`
 }
 
 type AccountRequest struct {
@@ -77,6 +79,7 @@ type AccountRequest struct {
 	Type                string `json:"type"`
 	Currency            string `json:"currency"`
 	InitialBalanceMinor int64  `json:"initial_balance_minor"`
+	Shared              *bool  `json:"shared"`
 }
 
 type accountResponse struct {
@@ -102,14 +105,28 @@ func (h *Handlers) RegisterUser(c echo.Context) error {
 		return c.JSON(http.StatusConflict, map[string]string{"error": "user already exists"})
 	}
 
-	familyName := req.FamilyName
-	if strings.TrimSpace(familyName) == "" {
-		familyName = req.Name + " family"
-	}
+	var family *domain.Family
+	var err error
+	creatingNewFamily := strings.TrimSpace(req.FamilyID) == ""
 
-	family, err := h.store.CreateFamily(c.Request().Context(), familyName, strings.ToUpper(req.Currency))
-	if err != nil {
-		return err
+	if creatingNewFamily {
+		familyName := req.FamilyName
+		if strings.TrimSpace(familyName) == "" {
+			familyName = req.Name + " family"
+		}
+
+		family, err = h.store.CreateFamily(c.Request().Context(), familyName, strings.ToUpper(req.Currency))
+		if err != nil {
+			return err
+		}
+	} else {
+		family, err = h.store.GetFamily(c.Request().Context(), strings.TrimSpace(req.FamilyID))
+		if err != nil {
+			return err
+		}
+		if family == nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "family not found"})
+		}
 	}
 
 	now := time.Now().UTC()
@@ -124,6 +141,9 @@ func (h *Handlers) RegisterUser(c echo.Context) error {
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
+	if !creatingNewFamily {
+		user.Role = "adult"
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return err
@@ -133,12 +153,14 @@ func (h *Handlers) RegisterUser(c echo.Context) error {
 		return err
 	}
 
-	if err := h.bootstrapCategories(c.Request().Context(), family.ID); err != nil {
-		return err
-	}
+	if creatingNewFamily {
+		if err := h.bootstrapCategories(c.Request().Context(), family.ID); err != nil {
+			return err
+		}
 
-	if err := h.bootstrapAccounts(c.Request().Context(), family.ID, strings.ToUpper(req.Currency)); err != nil {
-		return err
+		if err := h.bootstrapAccounts(c.Request().Context(), family.ID, strings.ToUpper(req.Currency)); err != nil {
+			return err
+		}
 	}
 
 	categories, err := h.store.ListCategoriesByFamily(c.Request().Context(), family.ID)
@@ -151,7 +173,12 @@ func (h *Handlers) RegisterUser(c echo.Context) error {
 		return err
 	}
 
-	return c.JSON(http.StatusCreated, RegisterResponse{User: *user, Family: *family, Categories: categories, Accounts: accounts})
+	members, err := h.store.ListFamilyMembers(c.Request().Context(), family.ID)
+	if err != nil {
+		return err
+	}
+
+	return c.JSON(http.StatusCreated, RegisterResponse{User: *user, Family: *family, Categories: categories, Accounts: accounts, Members: members})
 }
 
 func defaultLocale(locale string) string {
@@ -210,6 +237,22 @@ func (h *Handlers) ListAccounts(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{"accounts": accounts})
+}
+
+func (h *Handlers) ListMembers(c echo.Context) error {
+	userID := c.Param("id")
+	user, err := h.store.GetUser(c.Request().Context(), userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+	}
+	members, err := h.store.ListFamilyMembers(c.Request().Context(), user.FamilyID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{"members": members})
 }
 
 func (h *Handlers) CreateCategory(c echo.Context) error {
@@ -292,9 +335,13 @@ func (h *Handlers) CreateAccount(c echo.Context) error {
 		Type:         req.Type,
 		Currency:     req.Currency,
 		BalanceMinor: req.InitialBalanceMinor,
+		IsShared:     true,
 		IsArchived:   false,
 		CreatedAt:    now,
 		UpdatedAt:    now,
+	}
+	if req.Shared != nil {
+		account.IsShared = *req.Shared
 	}
 
 	if err := h.store.CreateAccount(c.Request().Context(), account); err != nil {
@@ -493,7 +540,7 @@ func (h *Handlers) CreateTransaction(c echo.Context) error {
 		return err
 	}
 
-	return c.JSON(http.StatusCreated, transactionResponse{Transaction: *txn})
+	return c.JSON(http.StatusCreated, transactionResponse{Transaction: domain.TransactionWithAuthor{Transaction: *txn, Author: domain.FamilyMember{ID: user.ID, Name: user.Name, Email: user.Email, Role: user.Role}}})
 }
 
 func (h *Handlers) ListTransactions(c echo.Context) error {
@@ -545,15 +592,27 @@ func (h *Handlers) ListTransactions(c echo.Context) error {
 		}
 	}
 
+	memberFilter := strings.TrimSpace(c.QueryParam("user_id"))
+	if memberFilter != "" {
+		member, err := h.store.GetUser(c.Request().Context(), memberFilter)
+		if err != nil {
+			return err
+		}
+		if member == nil || member.FamilyID != user.FamilyID {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "user not found"})
+		}
+	}
+
 	filters := store.TransactionListFilters{
 		Start:      startDate,
 		End:        endDate,
 		Type:       txnType,
 		CategoryID: categoryID,
 		AccountID:  accountID,
+		UserID:     memberFilter,
 	}
 
-	txns, err := h.store.ListTransactionsByUser(c.Request().Context(), userID, filters)
+	txns, err := h.store.ListTransactionsByFamily(c.Request().Context(), user.FamilyID, filters)
 	if err != nil {
 		return err
 	}
@@ -630,6 +689,7 @@ func (h *Handlers) bootstrapAccounts(ctx context.Context, familyID, currency str
 			Type:         base.accType,
 			Currency:     currency,
 			BalanceMinor: 0,
+			IsShared:     true,
 			IsArchived:   false,
 			CreatedAt:    now,
 			UpdatedAt:    now,
