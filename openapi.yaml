@@ -278,6 +278,80 @@ paths:
                       $ref: '#/components/schemas/Transaction'
         '404':
           description: Not found
+  /api/v1/users/{id}/planned-operations:
+    get:
+      summary: List planned operations for a user
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Planned operations grouped by status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlannedOperationsListResponse'
+        '404':
+          description: Not found
+    post:
+      summary: Create a planned operation for a user
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlannedOperationRequest'
+      responses:
+        '201':
+          description: Created planned operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlannedOperationResponse'
+        '400':
+          description: Validation error
+        '404':
+          description: Not found
+  /api/v1/users/{id}/planned-operations/{operationId}/complete:
+    post:
+      summary: Mark a planned operation as completed and record the transaction
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlannedOperationCompleteRequest'
+      responses:
+        '200':
+          description: Planned operation completion result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlannedOperationCompleteResponse'
+        '400':
+          description: Validation error
+        '404':
+          description: Not found
   /api/v1/transactions:
     post:
       summary: Create a transaction
@@ -526,3 +600,101 @@ components:
         occurred_at:
           type: string
           format: date-time
+    PlannedOperation:
+      type: object
+      properties:
+        id:
+          type: string
+        family_id:
+          type: string
+        user_id:
+          type: string
+        account_id:
+          type: string
+        category_id:
+          type: string
+        type:
+          type: string
+          enum: [income, expense]
+        title:
+          type: string
+        amount_minor:
+          type: integer
+        currency:
+          type: string
+        comment:
+          type: string
+          nullable: true
+        due_at:
+          type: string
+          format: date-time
+        recurrence:
+          type: string
+          nullable: true
+        is_completed:
+          type: boolean
+        last_completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        creator:
+          $ref: '#/components/schemas/FamilyMember'
+    PlannedOperationRequest:
+      type: object
+      required: [account_id, category_id, type, title, amount_minor, due_at]
+      properties:
+        account_id:
+          type: string
+        category_id:
+          type: string
+        type:
+          type: string
+          enum: [income, expense]
+        title:
+          type: string
+        amount_minor:
+          type: integer
+        currency:
+          type: string
+        comment:
+          type: string
+        due_at:
+          type: string
+          format: date-time
+        recurrence:
+          type: string
+    PlannedOperationResponse:
+      type: object
+      properties:
+        planned_operation:
+          $ref: '#/components/schemas/PlannedOperation'
+    PlannedOperationsListResponse:
+      type: object
+      properties:
+        planned_operations:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlannedOperation'
+        completed_operations:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlannedOperation'
+    PlannedOperationCompleteRequest:
+      type: object
+      properties:
+        occurred_at:
+          type: string
+          format: date-time
+    PlannedOperationCompleteResponse:
+      type: object
+      properties:
+        planned_operation:
+          $ref: '#/components/schemas/PlannedOperation'
+        transaction:
+          $ref: '#/components/schemas/Transaction'

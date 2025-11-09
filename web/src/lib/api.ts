@@ -89,6 +89,58 @@ export interface Transaction {
   author: FamilyMember;
 }
 
+export interface PlannedOperation {
+  id: string;
+  family_id: string;
+  user_id: string;
+  account_id: string;
+  category_id: string;
+  type: 'income' | 'expense';
+  title: string;
+  amount_minor: number;
+  currency: string;
+  comment?: string | null;
+  due_at: string;
+  recurrence?: string | null;
+  is_completed: boolean;
+  last_completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  creator: FamilyMember;
+}
+
+export type PlannedOperationRecurrence = '' | 'none' | 'weekly' | 'monthly' | 'yearly';
+
+export interface PlannedOperationPayload {
+  account_id: string;
+  category_id: string;
+  type: 'income' | 'expense';
+  title: string;
+  amount_minor: number;
+  currency?: string;
+  comment?: string;
+  due_at: string;
+  recurrence?: PlannedOperationRecurrence;
+}
+
+export interface PlannedOperationsResponse {
+  planned_operations: PlannedOperation[];
+  completed_operations: PlannedOperation[];
+}
+
+export interface PlannedOperationResponse {
+  planned_operation: PlannedOperation;
+}
+
+export interface CompletePlannedOperationPayload {
+  occurred_at?: string;
+}
+
+export interface CompletePlannedOperationResponse {
+  planned_operation: PlannedOperation;
+  transaction: Transaction;
+}
+
 export interface RegisterResponse {
   user: User;
   family: Family;
@@ -230,4 +282,33 @@ export async function fetchTransactions(userId: string, filters?: TransactionFil
 export async function fetchFamilyMembers(userId: string): Promise<FamilyMember[]> {
   const data = await request<{ members: FamilyMember[] }>(`/api/v1/users/${userId}/members`);
   return data.members;
+}
+
+export async function fetchPlannedOperations(userId: string): Promise<PlannedOperationsResponse> {
+  return request<PlannedOperationsResponse>(`/api/v1/users/${userId}/planned-operations`);
+}
+
+export async function createPlannedOperation(
+  userId: string,
+  payload: PlannedOperationPayload
+): Promise<PlannedOperation> {
+  const data = await request<PlannedOperationResponse>(`/api/v1/users/${userId}/planned-operations`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+  return data.planned_operation;
+}
+
+export async function completePlannedOperation(
+  userId: string,
+  operationId: string,
+  payload?: CompletePlannedOperationPayload
+): Promise<CompletePlannedOperationResponse> {
+  return request<CompletePlannedOperationResponse>(
+    `/api/v1/users/${userId}/planned-operations/${operationId}/complete`,
+    {
+      method: 'POST',
+      body: payload ? JSON.stringify(payload) : undefined
+    }
+  );
 }
