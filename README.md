@@ -217,7 +217,7 @@
     components/
   mobile/
     android/
-    ios/
+    ios/FamilyBudget
   migrations/
   openapi.yaml
   ```
