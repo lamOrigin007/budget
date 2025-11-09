@@ -9,6 +9,13 @@ type Family struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+type FamilyMember struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Email string `json:"email"`
+	Role  string `json:"role"`
+}
+
 type User struct {
 	ID              string    `json:"id"`
 	FamilyID        string    `json:"family_id"`
@@ -28,6 +35,7 @@ type Account struct {
 	Type         string    `json:"type"`
 	Currency     string    `json:"currency"`
 	BalanceMinor int64     `json:"balance_minor"`
+	IsShared     bool      `json:"is_shared"`
 	IsArchived   bool      `json:"is_archived"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -47,6 +55,11 @@ type Category struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+type TransactionWithAuthor struct {
+	Transaction
+	Author FamilyMember `json:"author"`
+}
+
 type Transaction struct {
 	ID          string    `json:"id"`
 	FamilyID    string    `json:"family_id"`
@@ -60,4 +73,28 @@ type Transaction struct {
 	OccurredAt  time.Time `json:"occurred_at"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type PlannedOperation struct {
+	ID              string     `json:"id"`
+	FamilyID        string     `json:"family_id"`
+	UserID          string     `json:"user_id"`
+	AccountID       string     `json:"account_id"`
+	CategoryID      string     `json:"category_id"`
+	Type            string     `json:"type"`
+	Title           string     `json:"title"`
+	AmountMinor     int64      `json:"amount_minor"`
+	Currency        string     `json:"currency"`
+	Comment         string     `json:"comment,omitempty"`
+	DueAt           time.Time  `json:"due_at"`
+	Recurrence      string     `json:"recurrence,omitempty"`
+	IsCompleted     bool       `json:"is_completed"`
+	LastCompletedAt *time.Time `json:"last_completed_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type PlannedOperationWithCreator struct {
+	PlannedOperation
+	Creator FamilyMember `json:"creator"`
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -32,13 +33,15 @@ type RegisterRequest struct {
 	Locale     string `json:"locale"`
 	Currency   string `json:"currency"`
 	FamilyName string `json:"family_name"`
+	FamilyID   string `json:"family_id"`
 }
 
 type RegisterResponse struct {
-	User       domain.User       `json:"user"`
-	Family     domain.Family     `json:"family"`
-	Categories []domain.Category `json:"categories"`
-	Accounts   []domain.Account  `json:"accounts"`
+	User       domain.User           `json:"user"`
+	Family     domain.Family         `json:"family"`
+	Categories []domain.Category     `json:"categories"`
+	Accounts   []domain.Account      `json:"accounts"`
+	Members    []domain.FamilyMember `json:"members"`
 }
 
 type CategoryRequest struct {
@@ -69,7 +72,7 @@ type TransactionRequest struct {
 }
 
 type transactionResponse struct {
-	Transaction domain.Transaction `json:"transaction"`
+	Transaction domain.TransactionWithAuthor `json:"transaction"`
 }
 
 type AccountRequest struct {
@@ -77,10 +80,36 @@ type AccountRequest struct {
 	Type                string `json:"type"`
 	Currency            string `json:"currency"`
 	InitialBalanceMinor int64  `json:"initial_balance_minor"`
+	Shared              *bool  `json:"shared"`
 }
 
 type accountResponse struct {
 	Account domain.Account `json:"account"`
+}
+
+type PlannedOperationRequest struct {
+	AccountID   string `json:"account_id"`
+	CategoryID  string `json:"category_id"`
+	Type        string `json:"type"`
+	Title       string `json:"title"`
+	AmountMinor int64  `json:"amount_minor"`
+	Currency    string `json:"currency"`
+	Comment     string `json:"comment"`
+	DueAt       string `json:"due_at"`
+	Recurrence  string `json:"recurrence"`
+}
+
+type plannedOperationResponse struct {
+	PlannedOperation domain.PlannedOperationWithCreator `json:"planned_operation"`
+}
+
+type plannedOperationsListResponse struct {
+	Planned   []domain.PlannedOperationWithCreator `json:"planned_operations"`
+	Completed []domain.PlannedOperationWithCreator `json:"completed_operations"`
+}
+
+type completePlannedOperationRequest struct {
+	OccurredAt string `json:"occurred_at"`
 }
 
 func NewHandlers(store *store.Store) *Handlers {
@@ -102,14 +131,28 @@ func (h *Handlers) RegisterUser(c echo.Context) error {
 		return c.JSON(http.StatusConflict, map[string]string{"error": "user already exists"})
 	}
 
-	familyName := req.FamilyName
-	if strings.TrimSpace(familyName) == "" {
-		familyName = req.Name + " family"
-	}
+	var family *domain.Family
+	var err error
+	creatingNewFamily := strings.TrimSpace(req.FamilyID) == ""
 
-	family, err := h.store.CreateFamily(c.Request().Context(), familyName, strings.ToUpper(req.Currency))
-	if err != nil {
-		return err
+	if creatingNewFamily {
+		familyName := req.FamilyName
+		if strings.TrimSpace(familyName) == "" {
+			familyName = req.Name + " family"
+		}
+
+		family, err = h.store.CreateFamily(c.Request().Context(), familyName, strings.ToUpper(req.Currency))
+		if err != nil {
+			return err
+		}
+	} else {
+		family, err = h.store.GetFamily(c.Request().Context(), strings.TrimSpace(req.FamilyID))
+		if err != nil {
+			return err
+		}
+		if family == nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "family not found"})
+		}
 	}
 
 	now := time.Now().UTC()
@@ -124,6 +167,9 @@ func (h *Handlers) RegisterUser(c echo.Context) error {
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
+	if !creatingNewFamily {
+		user.Role = "adult"
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return err
@@ -133,12 +179,14 @@ func (h *Handlers) RegisterUser(c echo.Context) error {
 		return err
 	}
 
-	if err := h.bootstrapCategories(c.Request().Context(), family.ID); err != nil {
-		return err
-	}
+	if creatingNewFamily {
+		if err := h.bootstrapCategories(c.Request().Context(), family.ID); err != nil {
+			return err
+		}
 
-	if err := h.bootstrapAccounts(c.Request().Context(), family.ID, strings.ToUpper(req.Currency)); err != nil {
-		return err
+		if err := h.bootstrapAccounts(c.Request().Context(), family.ID, strings.ToUpper(req.Currency)); err != nil {
+			return err
+		}
 	}
 
 	categories, err := h.store.ListCategoriesByFamily(c.Request().Context(), family.ID)
@@ -151,7 +199,12 @@ func (h *Handlers) RegisterUser(c echo.Context) error {
 		return err
 	}
 
-	return c.JSON(http.StatusCreated, RegisterResponse{User: *user, Family: *family, Categories: categories, Accounts: accounts})
+	members, err := h.store.ListFamilyMembers(c.Request().Context(), family.ID)
+	if err != nil {
+		return err
+	}
+
+	return c.JSON(http.StatusCreated, RegisterResponse{User: *user, Family: *family, Categories: categories, Accounts: accounts, Members: members})
 }
 
 func defaultLocale(locale string) string {
@@ -210,6 +263,22 @@ func (h *Handlers) ListAccounts(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{"accounts": accounts})
+}
+
+func (h *Handlers) ListMembers(c echo.Context) error {
+	userID := c.Param("id")
+	user, err := h.store.GetUser(c.Request().Context(), userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+	}
+	members, err := h.store.ListFamilyMembers(c.Request().Context(), user.FamilyID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{"members": members})
 }
 
 func (h *Handlers) CreateCategory(c echo.Context) error {
@@ -292,9 +361,13 @@ func (h *Handlers) CreateAccount(c echo.Context) error {
 		Type:         req.Type,
 		Currency:     req.Currency,
 		BalanceMinor: req.InitialBalanceMinor,
+		IsShared:     true,
 		IsArchived:   false,
 		CreatedAt:    now,
 		UpdatedAt:    now,
+	}
+	if req.Shared != nil {
+		account.IsShared = *req.Shared
 	}
 
 	if err := h.store.CreateAccount(c.Request().Context(), account); err != nil {
@@ -493,7 +566,7 @@ func (h *Handlers) CreateTransaction(c echo.Context) error {
 		return err
 	}
 
-	return c.JSON(http.StatusCreated, transactionResponse{Transaction: *txn})
+	return c.JSON(http.StatusCreated, transactionResponse{Transaction: domain.TransactionWithAuthor{Transaction: *txn, Author: domain.FamilyMember{ID: user.ID, Name: user.Name, Email: user.Email, Role: user.Role}}})
 }
 
 func (h *Handlers) ListTransactions(c echo.Context) error {
@@ -545,19 +618,294 @@ func (h *Handlers) ListTransactions(c echo.Context) error {
 		}
 	}
 
+	memberFilter := strings.TrimSpace(c.QueryParam("user_id"))
+	if memberFilter != "" {
+		member, err := h.store.GetUser(c.Request().Context(), memberFilter)
+		if err != nil {
+			return err
+		}
+		if member == nil || member.FamilyID != user.FamilyID {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "user not found"})
+		}
+	}
+
 	filters := store.TransactionListFilters{
 		Start:      startDate,
 		End:        endDate,
 		Type:       txnType,
 		CategoryID: categoryID,
 		AccountID:  accountID,
+		UserID:     memberFilter,
 	}
 
-	txns, err := h.store.ListTransactionsByUser(c.Request().Context(), userID, filters)
+	txns, err := h.store.ListTransactionsByFamily(c.Request().Context(), user.FamilyID, filters)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{"transactions": txns})
+}
+
+func (h *Handlers) CreatePlannedOperation(c echo.Context) error {
+	userID := c.Param("id")
+	user, err := h.store.GetUser(c.Request().Context(), userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+	}
+
+	var req PlannedOperationRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+	}
+
+	req.Title = strings.TrimSpace(req.Title)
+	if req.AccountID == "" || req.CategoryID == "" || req.Type == "" || req.Title == "" || req.AmountMinor <= 0 || req.DueAt == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "missing required fields"})
+	}
+	normalizedType := strings.ToLower(strings.TrimSpace(req.Type))
+	if normalizedType != "income" && normalizedType != "expense" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "type must be income or expense"})
+	}
+
+	recurrence, err := normalizeRecurrence(req.Recurrence)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+
+	account, err := h.store.GetAccount(c.Request().Context(), req.AccountID)
+	if err != nil {
+		return err
+	}
+	if account == nil || account.FamilyID != user.FamilyID {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "account not found"})
+	}
+	if account.IsArchived {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "account is archived"})
+	}
+
+	category, err := h.store.GetCategory(c.Request().Context(), req.CategoryID)
+	if err != nil {
+		return err
+	}
+	if category == nil || category.FamilyID != user.FamilyID {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "category not found"})
+	}
+	if category.IsArchived {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "category is archived"})
+	}
+	if strings.ToLower(category.Type) != normalizedType {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "category type mismatch"})
+	}
+
+	currency := strings.ToUpper(strings.TrimSpace(req.Currency))
+	if currency == "" {
+		currency = account.Currency
+	}
+	if currency != account.Currency {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "currency must match account currency"})
+	}
+
+	dueAt, err := time.Parse(time.RFC3339, req.DueAt)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "due_at must be RFC3339"})
+	}
+
+	now := time.Now().UTC()
+	plan := &domain.PlannedOperation{
+		ID:          uuid.NewString(),
+		FamilyID:    user.FamilyID,
+		UserID:      user.ID,
+		AccountID:   account.ID,
+		CategoryID:  category.ID,
+		Type:        normalizedType,
+		Title:       req.Title,
+		AmountMinor: req.AmountMinor,
+		Currency:    currency,
+		Comment:     strings.TrimSpace(req.Comment),
+		DueAt:       dueAt.UTC(),
+		Recurrence:  recurrence,
+		IsCompleted: false,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	if err := h.store.CreatePlannedOperation(c.Request().Context(), plan); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "account not found"})
+		}
+		if errors.Is(err, store.ErrAccountArchived) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "account is archived"})
+		}
+		return err
+	}
+
+	created, err := h.store.GetPlannedOperationWithCreator(c.Request().Context(), plan.ID)
+	if err != nil {
+		return err
+	}
+	if created == nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "planned operation not found after create"})
+	}
+
+	return c.JSON(http.StatusCreated, plannedOperationResponse{PlannedOperation: *created})
+}
+
+func (h *Handlers) ListPlannedOperations(c echo.Context) error {
+	userID := c.Param("id")
+	user, err := h.store.GetUser(c.Request().Context(), userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+	}
+
+	planned, err := h.store.ListPlannedOperationsByFamily(c.Request().Context(), user.FamilyID, store.PlannedOperationStatusPending)
+	if err != nil {
+		return err
+	}
+	completed, err := h.store.ListPlannedOperationsByFamily(c.Request().Context(), user.FamilyID, store.PlannedOperationStatusCompleted)
+	if err != nil {
+		return err
+	}
+
+	return c.JSON(http.StatusOK, plannedOperationsListResponse{Planned: planned, Completed: completed})
+}
+
+func (h *Handlers) CompletePlannedOperation(c echo.Context) error {
+	userID := c.Param("id")
+	planID := c.Param("operationId")
+
+	actor, err := h.store.GetUser(c.Request().Context(), userID)
+	if err != nil {
+		return err
+	}
+	if actor == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+	}
+
+	plan, err := h.store.GetPlannedOperation(c.Request().Context(), planID)
+	if err != nil {
+		return err
+	}
+	if plan == nil || plan.FamilyID != actor.FamilyID {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "planned operation not found"})
+	}
+
+	recurrence := strings.TrimSpace(plan.Recurrence)
+	if plan.IsCompleted && recurrence == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "operation already completed"})
+	}
+
+	var req completePlannedOperationRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+	}
+
+	occurredAt := time.Now().UTC()
+	if trimmed := strings.TrimSpace(req.OccurredAt); trimmed != "" {
+		parsed, err := time.Parse(time.RFC3339, trimmed)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "occurred_at must be RFC3339"})
+		}
+		occurredAt = parsed.UTC()
+	}
+
+	account, err := h.store.GetAccount(c.Request().Context(), plan.AccountID)
+	if err != nil {
+		return err
+	}
+	if account == nil || account.FamilyID != actor.FamilyID {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "account not found"})
+	}
+	if account.IsArchived {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "account is archived"})
+	}
+	if account.Currency != plan.Currency {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "account currency changed"})
+	}
+
+	category, err := h.store.GetCategory(c.Request().Context(), plan.CategoryID)
+	if err != nil {
+		return err
+	}
+	if category == nil || category.FamilyID != actor.FamilyID {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "category not found"})
+	}
+	if category.IsArchived {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "category is archived"})
+	}
+
+	comment := plan.Comment
+	if strings.TrimSpace(comment) == "" {
+		comment = plan.Title
+	}
+
+	now := time.Now().UTC()
+	txn := &domain.Transaction{
+		ID:          uuid.NewString(),
+		FamilyID:    plan.FamilyID,
+		UserID:      actor.ID,
+		AccountID:   plan.AccountID,
+		CategoryID:  plan.CategoryID,
+		Type:        plan.Type,
+		AmountMinor: plan.AmountMinor,
+		Currency:    plan.Currency,
+		Comment:     comment,
+		OccurredAt:  occurredAt,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	if err := h.store.CreateTransaction(c.Request().Context(), txn); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "account not found"})
+		}
+		if errors.Is(err, store.ErrAccountArchived) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "account is archived"})
+		}
+		return err
+	}
+
+	plan.LastCompletedAt = &now
+	plan.UpdatedAt = now
+	if recurrence == "" {
+		plan.IsCompleted = true
+	} else {
+		nextDue, nextErr := advanceRecurrence(plan.DueAt, recurrence)
+		if nextErr != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": nextErr.Error()})
+		}
+		for !nextDue.After(occurredAt) {
+			nextDue, nextErr = advanceRecurrence(nextDue, recurrence)
+			if nextErr != nil {
+				return c.JSON(http.StatusBadRequest, map[string]string{"error": nextErr.Error()})
+			}
+		}
+		plan.DueAt = nextDue
+		plan.IsCompleted = false
+	}
+
+	if err := h.store.UpdatePlannedOperationStatus(c.Request().Context(), plan); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "planned operation not found"})
+		}
+		return err
+	}
+
+	updatedPlan, err := h.store.GetPlannedOperationWithCreator(c.Request().Context(), plan.ID)
+	if err != nil {
+		return err
+	}
+	if updatedPlan == nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "planned operation not found after update"})
+	}
+
+	txnResponse := domain.TransactionWithAuthor{Transaction: *txn, Author: domain.FamilyMember{ID: actor.ID, Name: actor.Name, Email: actor.Email, Role: actor.Role}}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{"planned_operation": updatedPlan, "transaction": txnResponse})
 }
 
 func parseOptionalTime(value string) (*time.Time, error) {
@@ -570,6 +918,32 @@ func parseOptionalTime(value string) (*time.Time, error) {
 	}
 	t := parsed.UTC()
 	return &t, nil
+}
+
+func normalizeRecurrence(value string) (string, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	if trimmed == "" || trimmed == "none" {
+		return "", nil
+	}
+	switch trimmed {
+	case "weekly", "monthly", "yearly":
+		return trimmed, nil
+	default:
+		return "", fmt.Errorf("recurrence must be one of weekly, monthly, yearly or none")
+	}
+}
+
+func advanceRecurrence(current time.Time, recurrence string) (time.Time, error) {
+	switch strings.ToLower(strings.TrimSpace(recurrence)) {
+	case "weekly":
+		return current.AddDate(0, 0, 7), nil
+	case "monthly":
+		return current.AddDate(0, 1, 0), nil
+	case "yearly":
+		return current.AddDate(1, 0, 0), nil
+	default:
+		return time.Time{}, fmt.Errorf("unknown recurrence: %s", recurrence)
+	}
 }
 
 func (h *Handlers) bootstrapCategories(ctx context.Context, familyID string) error {
@@ -630,6 +1004,7 @@ func (h *Handlers) bootstrapAccounts(ctx context.Context, familyID, currency str
 			Type:         base.accType,
 			Currency:     currency,
 			BalanceMinor: 0,
+			IsShared:     true,
 			IsArchived:   false,
 			CreatedAt:    now,
 			UpdatedAt:    now,

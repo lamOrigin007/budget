@@ -42,8 +42,12 @@ func RegisterRoutes(e *echo.Echo, handlers *Handlers) {
 	api.POST("/users/:id/categories/:categoryId/archive", handlers.ToggleCategoryArchive)
 	api.GET("/users/:id/accounts", handlers.ListAccounts)
 	api.POST("/users/:id/accounts", handlers.CreateAccount)
+	api.GET("/users/:id/members", handlers.ListMembers)
 	api.POST("/transactions", handlers.CreateTransaction)
 	api.GET("/users/:id/transactions", handlers.ListTransactions)
+	api.GET("/users/:id/planned-operations", handlers.ListPlannedOperations)
+	api.POST("/users/:id/planned-operations", handlers.CreatePlannedOperation)
+	api.POST("/users/:id/planned-operations/:operationId/complete", handlers.CompletePlannedOperation)
 }
 
 type HealthResponse struct {

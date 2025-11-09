@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 
 function startOfCurrentMonth(): Date {
   const now = new Date();
@@ -38,6 +38,10 @@ import {
   AccountPayload,
   Category,
   CategoryPayload,
+  FamilyMember,
+  PlannedOperation,
+  PlannedOperationPayload,
+  PlannedOperationRecurrence,
   RegisterResponse,
   Transaction
 } from '../src/lib/api';
@@ -49,7 +53,11 @@ import {
   createCategory,
   updateCategory,
   setCategoryArchived,
-  createAccount
+  createAccount,
+  fetchFamilyMembers,
+  fetchPlannedOperations,
+  createPlannedOperation,
+  completePlannedOperation
 } from '../src/lib/api';
 
 type Step = 'register' | 'dashboard';
@@ -68,6 +76,7 @@ export default function Home() {
   const [userData, setUserData] = useState<RegisterResponse | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [familyMembers, setFamilyMembers] = useState<FamilyMember[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -75,6 +84,7 @@ export default function Home() {
   const [isRegistering, setIsRegistering] = useState(false);
   const [isSavingTransaction, setIsSavingTransaction] = useState(false);
   const [isTransactionsLoading, setIsTransactionsLoading] = useState(false);
+  const [membersError, setMembersError] = useState<string | null>(null);
   const [isCategorySubmitting, setIsCategorySubmitting] = useState(false);
   const [categoryError, setCategoryError] = useState<string | null>(null);
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
@@ -98,17 +108,45 @@ export default function Home() {
     type: Account['type'];
     currency: string;
     initial_balance_minor: string;
+    shared: boolean;
   }>({
     name: '',
     type: 'cash',
     currency: '',
-    initial_balance_minor: ''
+    initial_balance_minor: '',
+    shared: true
   });
   const [periodStart, setPeriodStart] = useState(() => formatDateInput(startOfCurrentMonth()));
   const [periodEnd, setPeriodEnd] = useState(() => formatDateInput(new Date()));
   const [filterType, setFilterType] = useState<'income' | 'expense' | ''>('');
   const [filterCategoryId, setFilterCategoryId] = useState<string>('');
   const [filterAccountId, setFilterAccountId] = useState<string>('');
+  const [filterUserId, setFilterUserId] = useState<string>('');
+  const [plannedOperations, setPlannedOperations] = useState<PlannedOperation[]>([]);
+  const [completedPlannedOperations, setCompletedPlannedOperations] = useState<PlannedOperation[]>([]);
+  const [plannedError, setPlannedError] = useState<string | null>(null);
+  const [isPlannedLoading, setIsPlannedLoading] = useState(false);
+  const [isPlannedSubmitting, setIsPlannedSubmitting] = useState(false);
+  const [completingPlanId, setCompletingPlanId] = useState<string | null>(null);
+  const [plannedForm, setPlannedForm] = useState<{
+    account_id: string;
+    category_id: string;
+    type: 'income' | 'expense';
+    title: string;
+    amount_minor: string;
+    due_date: string;
+    comment: string;
+    recurrence: PlannedOperationRecurrence;
+  }>(() => ({
+    account_id: '',
+    category_id: '',
+    type: 'expense',
+    title: '',
+    amount_minor: '',
+    due_date: formatDateInput(new Date()),
+    comment: '',
+    recurrence: ''
+  }));
 
   const activeCategories = useMemo(
     () => categories.filter((category) => !category.is_archived),
@@ -118,7 +156,12 @@ export default function Home() {
     () => categories.filter((category) => category.is_archived),
     [categories]
   );
+  const plannedAvailableCategories = useMemo(
+    () => activeCategories.filter((category) => category.type === plannedForm.type),
+    [activeCategories, plannedForm.type]
+  );
   const hasAccounts = accounts.length > 0;
+  const canPlanOperations = hasAccounts && plannedAvailableCategories.length > 0;
 
   useEffect(() => {
     if (filterCategoryId && !categories.some((category) => category.id === filterCategoryId)) {
@@ -132,6 +175,47 @@ export default function Home() {
     }
   }, [accounts, filterAccountId]);
 
+  useEffect(() => {
+    if (filterUserId && !familyMembers.some((member) => member.id === filterUserId)) {
+      setFilterUserId('');
+    }
+  }, [familyMembers, filterUserId]);
+
+  useEffect(() => {
+    setPlannedForm((prev) => ({
+      ...prev,
+      account_id:
+        prev.account_id && accounts.some((account) => account.id === prev.account_id)
+          ? prev.account_id
+          : accounts[0]?.id ?? ''
+    }));
+  }, [accounts]);
+
+  useEffect(() => {
+    setPlannedForm((prev) => {
+      const hasCategory =
+        prev.category_id &&
+        activeCategories.some((category) => category.id === prev.category_id && category.type === prev.type);
+      return {
+        ...prev,
+        category_id: hasCategory ? prev.category_id : plannedAvailableCategories[0]?.id ?? ''
+      };
+    });
+  }, [activeCategories, plannedAvailableCategories]);
+
+  useEffect(() => {
+    if (!userData) {
+      setFamilyMembers([]);
+      setMembersError(null);
+      setPlannedOperations([]);
+      setCompletedPlannedOperations([]);
+      setPlannedError(null);
+      return;
+    }
+    void refreshMembers(userData.user.id);
+    void refreshPlannedOperationsList(userData.user.id);
+  }, [refreshMembers, refreshPlannedOperationsList, userData?.user.id]);
+
   function sortAccounts(list: Account[]) {
     return [...list].sort((left, right) => left.name.localeCompare(right.name, 'ru'));
   }
@@ -140,6 +224,97 @@ export default function Home() {
     const value = valueMinor / 100;
     return `${value.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
   }
+
+  function formatRole(role: string) {
+    switch (role) {
+      case 'owner':
+        return 'владелец';
+      case 'adult':
+        return 'участник';
+      case 'junior':
+        return 'гость';
+      default:
+        return role;
+    }
+  }
+
+  function sortPlannedList(list: PlannedOperation[]) {
+    return [...list].sort(
+      (left, right) => new Date(left.due_at).getTime() - new Date(right.due_at).getTime()
+    );
+  }
+
+  function sortCompletedPlannedList(list: PlannedOperation[]) {
+    return [...list].sort((left, right) => {
+      const leftDate = new Date(left.last_completed_at ?? left.updated_at).getTime();
+      const rightDate = new Date(right.last_completed_at ?? right.updated_at).getTime();
+      return rightDate - leftDate;
+    });
+  }
+
+  function formatRecurrenceLabel(recurrence?: string | null) {
+    if (!recurrence || recurrence === '' || recurrence === 'none') {
+      return 'Единожды';
+    }
+    switch (recurrence) {
+      case 'weekly':
+        return 'Еженедельно';
+      case 'monthly':
+        return 'Ежемесячно';
+      case 'yearly':
+        return 'Ежегодно';
+      default:
+        return recurrence;
+    }
+  }
+
+  function getAccountName(accountId: string) {
+    return accounts.find((account) => account.id === accountId)?.name ?? 'Неизвестный счёт';
+  }
+
+  function getCategoryName(categoryId: string) {
+    return categories.find((category) => category.id === categoryId)?.name ?? 'Неизвестная категория';
+  }
+
+  const refreshMembers = useCallback(
+    async (userId: string) => {
+      try {
+        const list = await fetchFamilyMembers(userId);
+        setFamilyMembers(list);
+        setMembersError(null);
+      } catch (error) {
+        setMembersError(error instanceof Error ? error.message : 'Не удалось загрузить участников семьи');
+      }
+    },
+    []
+  );
+
+  const refreshPlannedOperationsList = useCallback(
+    async (userId: string) => {
+      setIsPlannedLoading(true);
+      try {
+        const data = await fetchPlannedOperations(userId);
+        const upcoming = [...data.planned_operations].sort(
+          (left, right) => new Date(left.due_at).getTime() - new Date(right.due_at).getTime()
+        );
+        const completed = [...data.completed_operations].sort((left, right) => {
+          const leftDate = new Date(left.last_completed_at ?? left.updated_at).getTime();
+          const rightDate = new Date(right.last_completed_at ?? right.updated_at).getTime();
+          return rightDate - leftDate;
+        });
+        setPlannedOperations(upcoming);
+        setCompletedPlannedOperations(completed);
+        setPlannedError(null);
+      } catch (error) {
+        setPlannedError(
+          error instanceof Error ? error.message : 'Не удалось загрузить запланированные операции'
+        );
+      } finally {
+        setIsPlannedLoading(false);
+      }
+    },
+    []
+  );
 
   async function refreshAccounts(userId: string, preferredAccountId?: string) {
     const list = sortAccounts(await fetchAccounts(userId));
@@ -178,7 +353,8 @@ export default function Home() {
         ...(endIso ? { end_date: endIso } : {}),
         ...(filterType ? { type: filterType } : {}),
         ...(filterCategoryId ? { category_id: filterCategoryId } : {}),
-        ...(filterAccountId ? { account_id: filterAccountId } : {})
+        ...(filterAccountId ? { account_id: filterAccountId } : {}),
+        ...(filterUserId ? { user_id: filterUserId } : {})
       });
       setTransactions(sortTransactions(tx));
     } catch (error) {
@@ -204,6 +380,9 @@ export default function Home() {
     if (filterAccountId && transaction.account_id !== filterAccountId) {
       return false;
     }
+    if (filterUserId && transaction.author.id !== filterUserId) {
+      return false;
+    }
     return true;
   }
 
@@ -219,9 +398,12 @@ export default function Home() {
         name: String(formData.get('name') ?? ''),
         currency: String(formData.get('currency') ?? 'RUB'),
         locale: String(formData.get('locale') ?? 'ru-RU'),
-        family_name: String(formData.get('family_name') ?? '')
+        family_name: String(formData.get('family_name') ?? ''),
+        family_id: String(formData.get('family_id') ?? '')
       });
       setUserData(response);
+      setFamilyMembers(response.members);
+      setMembersError(null);
       setCategories(sortCategories(response.categories));
       await refreshAccounts(response.user.id);
       setAccountForm((prev) => ({
@@ -229,6 +411,8 @@ export default function Home() {
         currency: response.user.currency_default
       }));
       await loadTransactionsForCurrentPeriod(response.user.id);
+      await refreshMembers(response.user.id);
+      await refreshPlannedOperationsList(response.user.id);
       setStep('dashboard');
       event.currentTarget.reset();
     } catch (error) {
@@ -282,6 +466,115 @@ export default function Home() {
       setCreateError(error instanceof Error ? error.message : 'Не удалось создать операцию');
     } finally {
       setIsSavingTransaction(false);
+    }
+  }
+
+  async function handlePlannedOperationSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!userData) {
+      return;
+    }
+    setPlannedError(null);
+
+    const account = accounts.find((item) => item.id === plannedForm.account_id);
+    if (!account) {
+      setPlannedError('Выберите счёт для планирования');
+      return;
+    }
+    if (!plannedForm.category_id) {
+      setPlannedError('Выберите категорию');
+      return;
+    }
+    const title = plannedForm.title.trim();
+    if (!title) {
+      setPlannedError('Название операции обязательно');
+      return;
+    }
+    const amountMinor = Number(plannedForm.amount_minor);
+    if (!Number.isFinite(amountMinor) || amountMinor <= 0) {
+      setPlannedError('Сумма должна быть больше нуля');
+      return;
+    }
+    const dueIso = toRFC3339FromDateInput(plannedForm.due_date);
+    if (!dueIso) {
+      setPlannedError('Укажите корректную дату выполнения');
+      return;
+    }
+
+    const payload: PlannedOperationPayload = {
+      account_id: account.id,
+      category_id: plannedForm.category_id,
+      type: plannedForm.type,
+      title,
+      amount_minor: amountMinor,
+      currency: account.currency,
+      due_at: dueIso
+    };
+    const comment = plannedForm.comment.trim();
+    if (comment) {
+      payload.comment = comment;
+    }
+    if (plannedForm.recurrence && plannedForm.recurrence !== '') {
+      payload.recurrence = plannedForm.recurrence;
+    }
+
+    setIsPlannedSubmitting(true);
+    try {
+      const created = await createPlannedOperation(userData.user.id, payload);
+      setPlannedOperations((prev) => sortPlannedList([...prev, created]));
+      setPlannedError(null);
+      setPlannedForm((prev) => ({
+        ...prev,
+        title: '',
+        amount_minor: '',
+        comment: ''
+      }));
+    } catch (error) {
+      setPlannedError(
+        error instanceof Error ? error.message : 'Не удалось создать запланированную операцию'
+      );
+    } finally {
+      setIsPlannedSubmitting(false);
+    }
+  }
+
+  async function handleCompletePlannedOperation(plan: PlannedOperation) {
+    if (!userData) {
+      return;
+    }
+    setPlannedError(null);
+    setCompletingPlanId(plan.id);
+    try {
+      const result = await completePlannedOperation(userData.user.id, plan.id);
+      const updatedPlan = result.planned_operation;
+      const transaction = result.transaction;
+      setPlannedOperations((prev) => {
+        const remaining = prev.filter((item) => item.id !== plan.id);
+        if (updatedPlan.is_completed) {
+          return remaining;
+        }
+        return sortPlannedList([...remaining, updatedPlan]);
+      });
+      setCompletedPlannedOperations((prev) => {
+        const filtered = prev.filter((item) => item.id !== plan.id);
+        if (updatedPlan.is_completed) {
+          return sortCompletedPlannedList([...filtered, updatedPlan]);
+        }
+        return filtered;
+      });
+      if (
+        isWithinPeriod(transaction.occurred_at, periodStart, periodEnd) &&
+        matchesTransactionFilters(transaction)
+      ) {
+        setTransactions((prev) => sortTransactions([transaction, ...prev]));
+      }
+      await refreshAccounts(userData.user.id, plan.account_id);
+    } catch (error) {
+      setPlannedError(
+        error instanceof Error ? error.message : 'Не удалось отметить выполнение операции'
+      );
+    } finally {
+      setCompletingPlanId(null);
     }
   }
 
@@ -347,7 +640,8 @@ export default function Home() {
 
     const payload: AccountPayload = {
       name: accountForm.name.trim(),
-      type: accountForm.type
+      type: accountForm.type,
+      shared: accountForm.shared
     };
     const currency = accountForm.currency.trim();
     if (currency) {
@@ -365,7 +659,8 @@ export default function Home() {
         name: '',
         type: 'cash',
         currency: account.currency,
-        initial_balance_minor: ''
+        initial_balance_minor: '',
+        shared: true
       });
     } catch (error) {
       setAccountError(error instanceof Error ? error.message : 'Не удалось создать счёт');
@@ -441,9 +736,19 @@ export default function Home() {
               <label htmlFor="family_name">Название семьи</label>
               <input id="family_name" name="family_name" placeholder="Семья Ивановых" className="input" />
             </div>
+            <div className="input-group">
+              <label htmlFor="family_id">ID существующей семьи</label>
+              <input
+                id="family_id"
+                name="family_id"
+                placeholder="Введите UUID, чтобы присоединиться"
+                className="input"
+              />
+              <p className="meta">Оставьте поле пустым, если создаёте новую семью.</p>
+            </div>
             {registerError && <p className="error">{registerError}</p>}
             <button type="submit" disabled={isRegistering} className="button">
-              {isRegistering ? 'Создание...' : 'Создать семью'}
+              {isRegistering ? 'Создание...' : 'Создать или присоединиться'}
             </button>
           </form>
         </div>
@@ -468,6 +773,30 @@ export default function Home() {
         <p className="highlight">
           Активные статьи бюджета: {activeCategories.map((category) => category.name).join(', ') || 'добавьте первую категорию'}
         </p>
+        <div style={{ marginTop: '1.25rem' }}>
+          <h3 style={{ fontSize: '1rem', marginBottom: '0.5rem' }}>Участники семьи</h3>
+          {membersError && <p className="error">{membersError}</p>}
+          {familyMembers.length === 0 ? (
+            <p className="highlight">Пригласите родственников, чтобы делиться общим бюджетом.</p>
+          ) : (
+            <ul className="transactions">
+              {familyMembers.map((member) => {
+                const isCurrent = member.id === userData?.user.id;
+                return (
+                  <li key={member.id} className="transaction-item" style={{ alignItems: 'flex-start' }}>
+                    <div>
+                      <p style={{ fontWeight: 600, color: '#e2e8f0' }}>
+                        {member.name} {isCurrent ? '· это вы' : ''}
+                      </p>
+                      <p className="meta">{member.email}</p>
+                      <p className="meta">Роль: {formatRole(member.role)}</p>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
       </section>
 
       <section className="panel">
@@ -491,6 +820,7 @@ export default function Home() {
                         <p style={{ fontWeight: 600, color: '#e2e8f0' }}>{account.name}</p>
                         <p className="meta">{accountTypeLabels[account.type]}</p>
                         <p className="meta">Валюта: {account.currency}</p>
+                        <p className="meta">{account.is_shared ? 'Общий счёт семьи' : 'Личный счёт'}</p>
                         {isSelected && <p className="highlight">Активный счёт для новых операций</p>}
                       </div>
                       <div className="amount" style={{ color: balanceColor }}>
@@ -555,6 +885,19 @@ export default function Home() {
                 onChange={(event) => setAccountForm((prev) => ({ ...prev, initial_balance_minor: event.target.value }))}
                 placeholder="0"
               />
+            </div>
+            <div className="input-group" style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+              <label htmlFor="account_shared" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <input
+                  id="account_shared"
+                  name="account_shared"
+                  type="checkbox"
+                  checked={accountForm.shared}
+                  onChange={(event) => setAccountForm((prev) => ({ ...prev, shared: event.target.checked }))}
+                />
+                Общий счёт семьи
+              </label>
+              <span className="meta">Снимите флажок, чтобы сделать счёт личным.</span>
             </div>
             {accountError && <p className="error" style={{ gridColumn: '1 / -1' }}>{accountError}</p>}
             <button type="submit" className="button" disabled={isAccountSubmitting} style={{ gridColumn: '1 / -1' }}>
@@ -647,6 +990,261 @@ export default function Home() {
               )}
             </div>
           </form>
+        </article>
+
+        <article className="panel">
+          <h2>Планирование операций</h2>
+          <p style={{ color: '#4b5563', marginBottom: '1rem' }}>
+            Запланируйте будущие или регулярные платежи и отмечайте выполнение. Баланс счёта обновится
+            автоматически.
+          </p>
+          <form
+            onSubmit={handlePlannedOperationSubmit}
+            className="form-grid"
+            style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', marginBottom: '1rem' }}
+          >
+            <div className="input-group">
+              <label htmlFor="planned_type">Тип операции</label>
+              <select
+                id="planned_type"
+                className="select"
+                value={plannedForm.type}
+                onChange={(event) =>
+                  setPlannedForm((prev) => ({
+                    ...prev,
+                    type: event.target.value as 'income' | 'expense'
+                  }))
+                }
+                disabled={!hasAccounts}
+              >
+                <option value="expense">Расход</option>
+                <option value="income">Доход</option>
+              </select>
+            </div>
+            <div className="input-group">
+              <label htmlFor="planned_account">Счёт</label>
+              <select
+                id="planned_account"
+                className="select"
+                value={plannedForm.account_id}
+                onChange={(event) =>
+                  setPlannedForm((prev) => ({ ...prev, account_id: event.target.value }))
+                }
+                disabled={!hasAccounts}
+              >
+                {accounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.name} · {account.currency}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="input-group">
+              <label htmlFor="planned_category">Категория</label>
+              <select
+                id="planned_category"
+                className="select"
+                value={plannedForm.category_id}
+                onChange={(event) =>
+                  setPlannedForm((prev) => ({ ...prev, category_id: event.target.value }))
+                }
+                disabled={!canPlanOperations}
+              >
+                {plannedAvailableCategories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="input-group">
+              <label htmlFor="planned_title">Название</label>
+              <input
+                id="planned_title"
+                className="input"
+                value={plannedForm.title}
+                onChange={(event) => setPlannedForm((prev) => ({ ...prev, title: event.target.value }))}
+                placeholder="Например: Коммунальные платежи"
+                disabled={!canPlanOperations}
+                required
+              />
+            </div>
+            <div className="input-group">
+              <label htmlFor="planned_amount">Сумма (в копейках)</label>
+              <input
+                id="planned_amount"
+                className="input"
+                type="number"
+                min="1"
+                value={plannedForm.amount_minor}
+                onChange={(event) =>
+                  setPlannedForm((prev) => ({ ...prev, amount_minor: event.target.value }))
+                }
+                disabled={!canPlanOperations}
+                required
+              />
+            </div>
+            <div className="input-group">
+              <label htmlFor="planned_due">Дата выполнения</label>
+              <input
+                id="planned_due"
+                className="input"
+                type="date"
+                value={plannedForm.due_date}
+                onChange={(event) => setPlannedForm((prev) => ({ ...prev, due_date: event.target.value }))}
+                disabled={!canPlanOperations}
+                required
+              />
+            </div>
+            <div className="input-group">
+              <label htmlFor="planned_recurrence">Повторение</label>
+              <select
+                id="planned_recurrence"
+                className="select"
+                value={plannedForm.recurrence}
+                onChange={(event) =>
+                  setPlannedForm((prev) => ({ ...prev, recurrence: event.target.value as PlannedOperationRecurrence }))
+                }
+                disabled={!canPlanOperations}
+              >
+                <option value="">Один раз</option>
+                <option value="weekly">Каждую неделю</option>
+                <option value="monthly">Каждый месяц</option>
+                <option value="yearly">Каждый год</option>
+              </select>
+            </div>
+            <div className="input-group" style={{ gridColumn: '1 / -1' }}>
+              <label htmlFor="planned_comment">Комментарий</label>
+              <textarea
+                id="planned_comment"
+                className="textarea"
+                rows={2}
+                value={plannedForm.comment}
+                onChange={(event) => setPlannedForm((prev) => ({ ...prev, comment: event.target.value }))}
+                placeholder="Дополнительная информация или получатель"
+                disabled={!canPlanOperations}
+              />
+            </div>
+            {!hasAccounts && (
+              <p className="highlight" style={{ gridColumn: '1 / -1' }}>
+                Добавьте счёт, чтобы планировать операции.
+              </p>
+            )}
+            {hasAccounts && plannedAvailableCategories.length === 0 && (
+              <p className="highlight" style={{ gridColumn: '1 / -1' }}>
+                Создайте категорию типа «{plannedForm.type === 'expense' ? 'Расход' : 'Доход'}», чтобы добавить план.
+              </p>
+            )}
+            {plannedError && (
+              <p className="error" style={{ gridColumn: '1 / -1' }}>
+                {plannedError}
+              </p>
+            )}
+            <button type="submit" className="button" disabled={isPlannedSubmitting || !canPlanOperations}>
+              {isPlannedSubmitting ? 'Сохранение...' : 'Сохранить план'}
+            </button>
+          </form>
+          <div
+            style={{
+              display: 'grid',
+              gap: '1.5rem',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))'
+            }}
+          >
+            <section>
+              <h3>Ближайшие операции</h3>
+              {isPlannedLoading ? (
+                <p>Загрузка...</p>
+              ) : plannedOperations.length === 0 ? (
+                <p style={{ color: '#4b5563' }}>Нет запланированных операций.</p>
+              ) : (
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                  {plannedOperations.map((operation) => (
+                    <li
+                      key={operation.id}
+                      style={{
+                        border: '1px solid #e2e8f0',
+                        borderRadius: '0.75rem',
+                        padding: '0.75rem 1rem',
+                        background: '#f8fafc'
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
+                        <div style={{ flex: '1 1 200px' }}>
+                          <strong>{operation.title}</strong>
+                          <div style={{ color: '#4b5563', marginTop: '0.25rem' }}>
+                            Счёт: {getAccountName(operation.account_id)}
+                          </div>
+                          <div style={{ color: '#4b5563' }}>Категория: {getCategoryName(operation.category_id)}</div>
+                          <div style={{ color: '#4b5563' }}>Ответственный: {operation.creator.name}</div>
+                          {operation.last_completed_at && (
+                            <div style={{ color: '#4b5563' }}>
+                              Последнее выполнение:{' '}
+                              {new Date(operation.last_completed_at).toLocaleString('ru-RU')}
+                            </div>
+                          )}
+                        </div>
+                        <div style={{ textAlign: 'right' }}>
+                          <div style={{ fontWeight: 600 }}>{formatMoney(operation.amount_minor, operation.currency)}</div>
+                          <div>К оплате: {new Date(operation.due_at).toLocaleDateString('ru-RU')}</div>
+                          <div>{formatRecurrenceLabel(operation.recurrence)}</div>
+                          <button
+                            type="button"
+                            className="button"
+                            style={{ marginTop: '0.5rem' }}
+                            onClick={() => handleCompletePlannedOperation(operation)}
+                            disabled={completingPlanId === operation.id}
+                          >
+                            {completingPlanId === operation.id ? 'Отмечаем...' : 'Отметить выполненной'}
+                          </button>
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+            <section>
+              <h3>Завершённые операции</h3>
+              {isPlannedLoading ? (
+                <p>Загрузка...</p>
+              ) : completedPlannedOperations.length === 0 ? (
+                <p style={{ color: '#4b5563' }}>Пока нет завершённых операций.</p>
+              ) : (
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                  {completedPlannedOperations.map((operation) => (
+                    <li
+                      key={operation.id}
+                      style={{
+                        border: '1px solid #e2e8f0',
+                        borderRadius: '0.75rem',
+                        padding: '0.75rem 1rem'
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
+                        <div style={{ flex: '1 1 200px' }}>
+                          <strong>{operation.title}</strong>
+                          <div style={{ color: '#4b5563', marginTop: '0.25rem' }}>
+                            Счёт: {getAccountName(operation.account_id)}
+                          </div>
+                          <div style={{ color: '#4b5563' }}>Категория: {getCategoryName(operation.category_id)}</div>
+                          <div style={{ color: '#4b5563' }}>Ответственный: {operation.creator.name}</div>
+                        </div>
+                        <div style={{ textAlign: 'right' }}>
+                          <div style={{ fontWeight: 600 }}>{formatMoney(operation.amount_minor, operation.currency)}</div>
+                          <div>
+                            Завершено:{' '}
+                            {new Date(operation.last_completed_at ?? operation.updated_at).toLocaleString('ru-RU')}
+                          </div>
+                          <div>{formatRecurrenceLabel(operation.recurrence)}</div>
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </div>
         </article>
 
         <article className="panel">
@@ -791,6 +1389,23 @@ export default function Home() {
                 ))}
               </select>
             </div>
+            <div className="input-group">
+              <label htmlFor="filter_user">Участник</label>
+              <select
+                id="filter_user"
+                name="filter_user"
+                className="select"
+                value={filterUserId}
+                onChange={(event) => setFilterUserId(event.target.value)}
+              >
+                <option value="">Все участники</option>
+                {familyMembers.map((member) => (
+                  <option key={member.id} value={member.id}>
+                    {member.name} · {formatRole(member.role)}
+                  </option>
+                ))}
+              </select>
+            </div>
             <div className="input-group" style={{ alignSelf: 'flex-end' }}>
               <button type="submit" className="button" disabled={isTransactionsLoading}>
                 {isTransactionsLoading ? 'Загрузка...' : 'Обновить период'}
@@ -815,6 +1430,10 @@ export default function Home() {
                     <p style={{ fontWeight: 600, color: category?.color ?? '#e2e8f0' }}>{category?.name ?? 'Категория'}</p>
                     <p className="meta">{new Date(transaction.occurred_at).toLocaleString()}</p>
                     <p className="meta">Счёт: {account?.name ?? 'недоступно'}</p>
+                    <p className="meta">
+                      Автор: {transaction.author.name}
+                      {transaction.author.id === userData?.user.id ? ' · это вы' : ''} ({formatRole(transaction.author.role)})
+                    </p>
                     {transaction.comment && (
                       <p className="highlight" style={{ color: '#e2e8f0', marginTop: '0.35rem' }}>{transaction.comment}</p>
                     )}

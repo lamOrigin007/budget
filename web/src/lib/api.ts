@@ -5,6 +5,7 @@ export interface RegisterRequest {
   locale?: string;
   currency: string;
   family_name?: string;
+  family_id?: string;
 }
 
 export interface User {
@@ -47,9 +48,17 @@ export interface Account {
   type: 'cash' | 'card' | 'bank' | 'deposit' | 'wallet';
   currency: string;
   balance_minor: number;
+  is_shared: boolean;
   is_archived: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface FamilyMember {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
 }
 
 export interface CategoryPayload {
@@ -77,6 +86,59 @@ export interface Transaction {
   occurred_at: string;
   created_at: string;
   updated_at: string;
+  author: FamilyMember;
+}
+
+export interface PlannedOperation {
+  id: string;
+  family_id: string;
+  user_id: string;
+  account_id: string;
+  category_id: string;
+  type: 'income' | 'expense';
+  title: string;
+  amount_minor: number;
+  currency: string;
+  comment?: string | null;
+  due_at: string;
+  recurrence?: string | null;
+  is_completed: boolean;
+  last_completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  creator: FamilyMember;
+}
+
+export type PlannedOperationRecurrence = '' | 'none' | 'weekly' | 'monthly' | 'yearly';
+
+export interface PlannedOperationPayload {
+  account_id: string;
+  category_id: string;
+  type: 'income' | 'expense';
+  title: string;
+  amount_minor: number;
+  currency?: string;
+  comment?: string;
+  due_at: string;
+  recurrence?: PlannedOperationRecurrence;
+}
+
+export interface PlannedOperationsResponse {
+  planned_operations: PlannedOperation[];
+  completed_operations: PlannedOperation[];
+}
+
+export interface PlannedOperationResponse {
+  planned_operation: PlannedOperation;
+}
+
+export interface CompletePlannedOperationPayload {
+  occurred_at?: string;
+}
+
+export interface CompletePlannedOperationResponse {
+  planned_operation: PlannedOperation;
+  transaction: Transaction;
 }
 
 export interface RegisterResponse {
@@ -84,6 +146,7 @@ export interface RegisterResponse {
   family: Family;
   categories: Category[];
   accounts: Account[];
+  members: FamilyMember[];
 }
 
 export interface TransactionRequest {
@@ -102,6 +165,7 @@ export interface AccountPayload {
   type: 'cash' | 'card' | 'bank' | 'deposit' | 'wallet';
   currency?: string;
   initial_balance_minor?: number;
+  shared?: boolean;
 }
 
 export interface TransactionFilters {
@@ -213,4 +277,38 @@ export async function fetchTransactions(userId: string, filters?: TransactionFil
   const url = `/api/v1/users/${userId}/transactions${query ? `?${query}` : ''}`;
   const data = await request<{ transactions: Transaction[] }>(url);
   return data.transactions;
+}
+
+export async function fetchFamilyMembers(userId: string): Promise<FamilyMember[]> {
+  const data = await request<{ members: FamilyMember[] }>(`/api/v1/users/${userId}/members`);
+  return data.members;
+}
+
+export async function fetchPlannedOperations(userId: string): Promise<PlannedOperationsResponse> {
+  return request<PlannedOperationsResponse>(`/api/v1/users/${userId}/planned-operations`);
+}
+
+export async function createPlannedOperation(
+  userId: string,
+  payload: PlannedOperationPayload
+): Promise<PlannedOperation> {
+  const data = await request<PlannedOperationResponse>(`/api/v1/users/${userId}/planned-operations`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+  return data.planned_operation;
+}
+
+export async function completePlannedOperation(
+  userId: string,
+  operationId: string,
+  payload?: CompletePlannedOperationPayload
+): Promise<CompletePlannedOperationResponse> {
+  return request<CompletePlannedOperationResponse>(
+    `/api/v1/users/${userId}/planned-operations/${operationId}/complete`,
+    {
+      method: 'POST',
+      body: payload ? JSON.stringify(payload) : undefined
+    }
+  );
 }

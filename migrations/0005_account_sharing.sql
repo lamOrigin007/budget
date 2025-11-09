@@ -1,0 +1,6 @@
+ALTER TABLE accounts
+    ADD COLUMN IF NOT EXISTS is_shared BOOLEAN NOT NULL DEFAULT TRUE;
+
+UPDATE accounts
+SET is_shared = TRUE
+WHERE is_shared IS NULL;
