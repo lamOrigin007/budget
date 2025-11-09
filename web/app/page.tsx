@@ -43,6 +43,7 @@ import {
   PlannedOperationPayload,
   PlannedOperationRecurrence,
   RegisterResponse,
+  ReportsOverview,
   Transaction
 } from '../src/lib/api';
 import {
@@ -57,7 +58,8 @@ import {
   fetchFamilyMembers,
   fetchPlannedOperations,
   createPlannedOperation,
-  completePlannedOperation
+  completePlannedOperation,
+  fetchReportsOverview
 } from '../src/lib/api';
 
 type Step = 'register' | 'dashboard';
@@ -128,6 +130,9 @@ export default function Home() {
   const [isPlannedLoading, setIsPlannedLoading] = useState(false);
   const [isPlannedSubmitting, setIsPlannedSubmitting] = useState(false);
   const [completingPlanId, setCompletingPlanId] = useState<string | null>(null);
+  const [reportsOverview, setReportsOverview] = useState<ReportsOverview | null>(null);
+  const [reportsError, setReportsError] = useState<string | null>(null);
+  const [isReportsLoading, setIsReportsLoading] = useState(false);
   const [plannedForm, setPlannedForm] = useState<{
     account_id: string;
     category_id: string;
@@ -160,6 +165,28 @@ export default function Home() {
     () => activeCategories.filter((category) => category.type === plannedForm.type),
     [activeCategories, plannedForm.type]
   );
+  const periodLabel = useMemo(() => {
+    if (periodStart && periodEnd) {
+      return `с ${periodStart} по ${periodEnd}`;
+    }
+    if (periodStart) {
+      return `с ${periodStart}`;
+    }
+    if (periodEnd) {
+      return `по ${periodEnd}`;
+    }
+    return 'за всё время';
+  }, [periodStart, periodEnd]);
+  const accountTotals = useMemo(() => {
+    if (!reportsOverview) {
+      return [] as { currency: string; amount_minor: number }[];
+    }
+    const totals = new Map<string, number>();
+    for (const account of reportsOverview.account_balances) {
+      totals.set(account.currency, (totals.get(account.currency) ?? 0) + account.balance_minor);
+    }
+    return Array.from(totals.entries()).map(([currency, amount]) => ({ currency, amount_minor: amount }));
+  }, [reportsOverview]);
   const hasAccounts = accounts.length > 0;
   const canPlanOperations = hasAccounts && plannedAvailableCategories.length > 0;
 
@@ -210,6 +237,9 @@ export default function Home() {
       setPlannedOperations([]);
       setCompletedPlannedOperations([]);
       setPlannedError(null);
+      setReportsOverview(null);
+      setReportsError(null);
+      setIsReportsLoading(false);
       return;
     }
     void refreshMembers(userData.user.id);
@@ -276,6 +306,34 @@ export default function Home() {
     return categories.find((category) => category.id === categoryId)?.name ?? 'Неизвестная категория';
   }
 
+  function formatTotals(totals: { currency: string; amount_minor: number }[]) {
+    if (totals.length === 0) {
+      return '0';
+    }
+    return totals
+      .map((item) => formatMoney(item.amount_minor, item.currency))
+      .join(' · ');
+  }
+
+  function resolvePeriodRange(): {
+    startIso?: string;
+    endIso?: string;
+    error?: string;
+  } {
+    const startIso = toRFC3339FromDateInput(periodStart);
+    const endIso = toRFC3339FromDateInput(periodEnd, true);
+    if (periodStart && !startIso) {
+      return { error: 'Некорректная дата начала' };
+    }
+    if (periodEnd && !endIso) {
+      return { error: 'Некорректная дата окончания' };
+    }
+    if (startIso && endIso && new Date(startIso).getTime() > new Date(endIso).getTime()) {
+      return { error: 'Дата начала должна быть не позже даты окончания' };
+    }
+    return { startIso, endIso };
+  }
+
   const refreshMembers = useCallback(
     async (userId: string) => {
       try {
@@ -337,30 +395,89 @@ export default function Home() {
   }
 
   async function loadTransactionsForCurrentPeriod(userId: string) {
-    const startIso = toRFC3339FromDateInput(periodStart);
-    const endIso = toRFC3339FromDateInput(periodEnd, true);
-    if (startIso && endIso && new Date(startIso).getTime() > new Date(endIso).getTime()) {
-      setTransactionsError('Дата начала должна быть не позже даты окончания');
+    const { startIso, endIso, error } = resolvePeriodRange();
+    if (error) {
+      setTransactionsError(error);
       setTransactions([]);
+      setReportsError(error);
+      setReportsOverview(null);
       return;
     }
 
     setTransactionsError(null);
+    setReportsError(null);
     setIsTransactionsLoading(true);
+    setIsReportsLoading(true);
+
+    const txFilters = {
+      ...(startIso ? { start_date: startIso } : {}),
+      ...(endIso ? { end_date: endIso } : {}),
+      ...(filterType ? { type: filterType } : {}),
+      ...(filterCategoryId ? { category_id: filterCategoryId } : {}),
+      ...(filterAccountId ? { account_id: filterAccountId } : {}),
+      ...(filterUserId ? { user_id: filterUserId } : {})
+    };
+    const reportFilters = {
+      ...(startIso ? { start_date: startIso } : {}),
+      ...(endIso ? { end_date: endIso } : {})
+    };
+
     try {
-      const tx = await fetchTransactions(userId, {
-        ...(startIso ? { start_date: startIso } : {}),
-        ...(endIso ? { end_date: endIso } : {}),
-        ...(filterType ? { type: filterType } : {}),
-        ...(filterCategoryId ? { category_id: filterCategoryId } : {}),
-        ...(filterAccountId ? { account_id: filterAccountId } : {}),
-        ...(filterUserId ? { user_id: filterUserId } : {})
-      });
-      setTransactions(sortTransactions(tx));
-    } catch (error) {
-      setTransactionsError(error instanceof Error ? error.message : 'Не удалось загрузить операции');
+      const [txResult, reportResult] = await Promise.allSettled([
+        fetchTransactions(userId, txFilters),
+        fetchReportsOverview(userId, reportFilters)
+      ]);
+
+      if (txResult.status === 'fulfilled') {
+        setTransactions(sortTransactions(txResult.value));
+      } else {
+        setTransactions([]);
+        setTransactionsError(
+          txResult.reason instanceof Error
+            ? txResult.reason.message
+            : 'Не удалось загрузить операции'
+        );
+      }
+
+      if (reportResult.status === 'fulfilled') {
+        setReportsOverview(reportResult.value);
+      } else {
+        setReportsOverview(null);
+        setReportsError(
+          reportResult.reason instanceof Error
+            ? reportResult.reason.message
+            : 'Не удалось загрузить отчёты'
+        );
+      }
     } finally {
       setIsTransactionsLoading(false);
+      setIsReportsLoading(false);
+    }
+  }
+
+  async function loadReportsForCurrentPeriod(userId: string) {
+    const { startIso, endIso, error } = resolvePeriodRange();
+    if (error) {
+      setReportsError(error);
+      setReportsOverview(null);
+      return;
+    }
+
+    setReportsError(null);
+    setIsReportsLoading(true);
+    try {
+      const report = await fetchReportsOverview(userId, {
+        ...(startIso ? { start_date: startIso } : {}),
+        ...(endIso ? { end_date: endIso } : {})
+      });
+      setReportsOverview(report);
+    } catch (reportError) {
+      setReportsOverview(null);
+      setReportsError(
+        reportError instanceof Error ? reportError.message : 'Не удалось загрузить отчёты'
+      );
+    } finally {
+      setIsReportsLoading(false);
     }
   }
 
@@ -461,6 +578,7 @@ export default function Home() {
         setTransactions((prev) => sortTransactions([transaction, ...prev]));
       }
       await refreshAccounts(userData.user.id, account.id);
+      void loadReportsForCurrentPeriod(userData.user.id);
       event.currentTarget.reset();
     } catch (error) {
       setCreateError(error instanceof Error ? error.message : 'Не удалось создать операцию');
@@ -569,6 +687,7 @@ export default function Home() {
         setTransactions((prev) => sortTransactions([transaction, ...prev]));
       }
       await refreshAccounts(userData.user.id, plan.account_id);
+      void loadReportsForCurrentPeriod(userData.user.id);
     } catch (error) {
       setPlannedError(
         error instanceof Error ? error.message : 'Не удалось отметить выполнение операции'
@@ -655,6 +774,7 @@ export default function Home() {
     try {
       const account = await createAccount(userData.user.id, payload);
       await refreshAccounts(userData.user.id, account.id);
+      void loadReportsForCurrentPeriod(userData.user.id);
       setAccountForm({
         name: '',
         type: 'cash',
@@ -905,6 +1025,194 @@ export default function Home() {
             </button>
           </form>
         </div>
+      </section>
+
+      <section className="panel">
+        <h2>Отчёты за период</h2>
+        <p className="meta">Период: {periodLabel}</p>
+        {reportsError && <p className="error">{reportsError}</p>}
+        {isReportsLoading ? (
+          <p>Загрузка отчётов...</p>
+        ) : !reportsOverview ? (
+          <p className="highlight">Нет данных для выбранного периода. Добавьте операции, чтобы увидеть аналитику.</p>
+        ) : (
+          <div
+            style={{
+              display: 'grid',
+              gap: '1.5rem',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))'
+            }}
+          >
+            <div>
+              <h3 style={{ marginBottom: '0.5rem' }}>Расходы по категориям</h3>
+              {reportsOverview.expenses.totals.length > 0 && (
+                <p className="meta">Итого: {formatTotals(reportsOverview.expenses.totals)}</p>
+              )}
+              {reportsOverview.expenses.by_category.length === 0 ? (
+                <p className="highlight">В выбранном периоде не было расходных операций.</p>
+              ) : (
+                <ul
+                  style={{
+                    listStyle: 'none',
+                    padding: 0,
+                    margin: 0,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '0.75rem'
+                  }}
+                >
+                  {reportsOverview.expenses.by_category.map((item) => (
+                    <li
+                      key={`${item.category_id}-${item.currency}`}
+                      style={{
+                        padding: '0.75rem',
+                        borderRadius: '0.75rem',
+                        background: '#0f172a',
+                        border: '1px solid #1e293b'
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: '0.75rem'
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <span
+                            aria-hidden
+                            style={{
+                              width: '0.75rem',
+                              height: '0.75rem',
+                              borderRadius: '9999px',
+                              background: item.category_color
+                            }}
+                          />
+                          <span>{item.category_name}</span>
+                        </div>
+                        <span style={{ fontWeight: 600 }}>
+                          {formatMoney(item.amount_minor, item.currency)}
+                        </span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div>
+              <h3 style={{ marginBottom: '0.5rem' }}>Доходы</h3>
+              {reportsOverview.incomes.totals.length > 0 && (
+                <p className="meta">Итого: {formatTotals(reportsOverview.incomes.totals)}</p>
+              )}
+              {reportsOverview.incomes.by_category.length === 0 ? (
+                <p className="highlight">В выбранном периоде не было доходов.</p>
+              ) : (
+                <ul
+                  style={{
+                    listStyle: 'none',
+                    padding: 0,
+                    margin: 0,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '0.75rem'
+                  }}
+                >
+                  {reportsOverview.incomes.by_category.map((item) => (
+                    <li
+                      key={`${item.category_id}-${item.currency}`}
+                      style={{
+                        padding: '0.75rem',
+                        borderRadius: '0.75rem',
+                        background: '#0f172a',
+                        border: '1px solid #1e293b'
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: '0.75rem'
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <span
+                            aria-hidden
+                            style={{
+                              width: '0.75rem',
+                              height: '0.75rem',
+                              borderRadius: '9999px',
+                              background: item.category_color
+                            }}
+                          />
+                          <span>{item.category_name}</span>
+                        </div>
+                        <span style={{ fontWeight: 600, color: '#34d399' }}>
+                          {formatMoney(item.amount_minor, item.currency)}
+                        </span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div>
+              <h3 style={{ marginBottom: '0.5rem' }}>Баланс по счетам</h3>
+              {accountTotals.length > 0 && (
+                <p className="meta">Суммарно: {formatTotals(accountTotals)}</p>
+              )}
+              {reportsOverview.account_balances.length === 0 ? (
+                <p className="highlight">Добавьте счёт, чтобы видеть остатки семьи.</p>
+              ) : (
+                <ul
+                  style={{
+                    listStyle: 'none',
+                    padding: 0,
+                    margin: 0,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '0.75rem'
+                  }}
+                >
+                  {reportsOverview.account_balances.map((account) => {
+                    const color = account.balance_minor >= 0 ? '#34d399' : '#f87171';
+                    return (
+                      <li
+                        key={account.account_id}
+                        style={{
+                          padding: '0.75rem',
+                          borderRadius: '0.75rem',
+                          background: '#0f172a',
+                          border: '1px solid #1e293b',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          gap: '0.75rem'
+                        }}
+                      >
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                          <strong>{account.account_name}</strong>
+                          <span className="meta">{accountTypeLabels[account.account_type]}</span>
+                          <span className="meta">
+                            {account.is_shared ? 'Общий счёт семьи' : 'Личный счёт'}
+                          </span>
+                          {account.is_archived && (
+                            <span className="meta" style={{ color: '#facc15' }}>
+                              В архиве
+                            </span>
+                          )}
+                        </div>
+                        <div className="amount" style={{ color }}>
+                          {formatMoney(account.balance_minor, account.currency)}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          </div>
+        )}
       </section>
 
       <div className="dashboard-columns">

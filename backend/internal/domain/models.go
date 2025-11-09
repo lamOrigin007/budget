@@ -98,3 +98,43 @@ type PlannedOperationWithCreator struct {
 	PlannedOperation
 	Creator FamilyMember `json:"creator"`
 }
+
+type ReportPeriod struct {
+	Start *time.Time `json:"start_date,omitempty"`
+	End   *time.Time `json:"end_date,omitempty"`
+}
+
+type CurrencyAmount struct {
+	Currency    string `json:"currency"`
+	AmountMinor int64  `json:"amount_minor"`
+}
+
+type CategoryReportItem struct {
+	CategoryID    string `json:"category_id"`
+	CategoryName  string `json:"category_name"`
+	CategoryColor string `json:"category_color"`
+	Currency      string `json:"currency"`
+	AmountMinor   int64  `json:"amount_minor"`
+}
+
+type MovementReport struct {
+	Totals     []CurrencyAmount     `json:"totals"`
+	ByCategory []CategoryReportItem `json:"by_category"`
+}
+
+type AccountBalanceReport struct {
+	AccountID    string `json:"account_id"`
+	AccountName  string `json:"account_name"`
+	AccountType  string `json:"account_type"`
+	Currency     string `json:"currency"`
+	BalanceMinor int64  `json:"balance_minor"`
+	IsShared     bool   `json:"is_shared"`
+	IsArchived   bool   `json:"is_archived"`
+}
+
+type ReportsOverview struct {
+	Period          ReportPeriod           `json:"period"`
+	Expenses        MovementReport         `json:"expenses"`
+	Incomes         MovementReport         `json:"incomes"`
+	AccountBalances []AccountBalanceReport `json:"account_balances"`
+}

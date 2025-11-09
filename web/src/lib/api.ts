@@ -141,6 +141,44 @@ export interface CompletePlannedOperationResponse {
   transaction: Transaction;
 }
 
+export interface CurrencyAmount {
+  currency: string;
+  amount_minor: number;
+}
+
+export interface CategoryReportItem {
+  category_id: string;
+  category_name: string;
+  category_color: string;
+  currency: string;
+  amount_minor: number;
+}
+
+export interface MovementReport {
+  totals: CurrencyAmount[];
+  by_category: CategoryReportItem[];
+}
+
+export interface AccountBalanceReport {
+  account_id: string;
+  account_name: string;
+  account_type: Account['type'];
+  currency: string;
+  balance_minor: number;
+  is_shared: boolean;
+  is_archived: boolean;
+}
+
+export interface ReportsOverview {
+  period: {
+    start_date?: string;
+    end_date?: string;
+  };
+  expenses: MovementReport;
+  incomes: MovementReport;
+  account_balances: AccountBalanceReport[];
+}
+
 export interface RegisterResponse {
   user: User;
   family: Family;
@@ -174,6 +212,12 @@ export interface TransactionFilters {
   type?: 'income' | 'expense';
   category_id?: string;
   account_id?: string;
+  user_id?: string;
+}
+
+export interface ReportFilters {
+  start_date?: string;
+  end_date?: string;
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:8080';
@@ -277,6 +321,23 @@ export async function fetchTransactions(userId: string, filters?: TransactionFil
   const url = `/api/v1/users/${userId}/transactions${query ? `?${query}` : ''}`;
   const data = await request<{ transactions: Transaction[] }>(url);
   return data.transactions;
+}
+
+export async function fetchReportsOverview(
+  userId: string,
+  filters?: ReportFilters
+): Promise<ReportsOverview> {
+  const search = new URLSearchParams();
+  if (filters?.start_date) {
+    search.set('start_date', filters.start_date);
+  }
+  if (filters?.end_date) {
+    search.set('end_date', filters.end_date);
+  }
+  const query = search.toString();
+  const url = `/api/v1/users/${userId}/reports/overview${query ? `?${query}` : ''}`;
+  const data = await request<{ reports: ReportsOverview }>(url);
+  return data.reports;
 }
 
 export async function fetchFamilyMembers(userId: string): Promise<FamilyMember[]> {

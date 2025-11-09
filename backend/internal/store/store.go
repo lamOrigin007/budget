@@ -386,6 +386,122 @@ func (s *Store) GetFamily(ctx context.Context, id string) (*domain.Family, error
 	return &family, nil
 }
 
+func (s *Store) reportByCategory(ctx context.Context, familyID, txnType string, start, end *time.Time) ([]domain.CategoryReportItem, error) {
+	baseQuery := `SELECT c.id, c.name, c.color, t.currency, SUM(t.amount_minor) AS total
+FROM transactions t
+JOIN categories c ON c.id = t.category_id
+WHERE t.family_id = ? AND LOWER(t.type) = ?`
+	args := []interface{}{familyID, strings.ToLower(txnType)}
+	if start != nil {
+		baseQuery += " AND t.occurred_at >= ?"
+		args = append(args, start.UTC())
+	}
+	if end != nil {
+		baseQuery += " AND t.occurred_at <= ?"
+		args = append(args, end.UTC())
+	}
+	baseQuery += " GROUP BY c.id, c.name, c.color, t.currency ORDER BY total DESC"
+
+	rows, err := s.db.QueryContext(ctx, baseQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []domain.CategoryReportItem
+	for rows.Next() {
+		var item domain.CategoryReportItem
+		if err := rows.Scan(&item.CategoryID, &item.CategoryName, &item.CategoryColor, &item.Currency, &item.AmountMinor); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) reportTotalsByType(ctx context.Context, familyID, txnType string, start, end *time.Time) ([]domain.CurrencyAmount, error) {
+	baseQuery := `SELECT t.currency, SUM(t.amount_minor) AS total
+FROM transactions t
+WHERE t.family_id = ? AND LOWER(t.type) = ?`
+	args := []interface{}{familyID, strings.ToLower(txnType)}
+	if start != nil {
+		baseQuery += " AND t.occurred_at >= ?"
+		args = append(args, start.UTC())
+	}
+	if end != nil {
+		baseQuery += " AND t.occurred_at <= ?"
+		args = append(args, end.UTC())
+	}
+	baseQuery += " GROUP BY t.currency ORDER BY total DESC"
+
+	rows, err := s.db.QueryContext(ctx, baseQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var totals []domain.CurrencyAmount
+	for rows.Next() {
+		var total domain.CurrencyAmount
+		if err := rows.Scan(&total.Currency, &total.AmountMinor); err != nil {
+			return nil, err
+		}
+		totals = append(totals, total)
+	}
+	return totals, rows.Err()
+}
+
+func (s *Store) GetReportsOverview(ctx context.Context, familyID string, start, end *time.Time) (domain.ReportsOverview, error) {
+	expensesByCategory, err := s.reportByCategory(ctx, familyID, "expense", start, end)
+	if err != nil {
+		return domain.ReportsOverview{}, err
+	}
+	expenseTotals, err := s.reportTotalsByType(ctx, familyID, "expense", start, end)
+	if err != nil {
+		return domain.ReportsOverview{}, err
+	}
+
+	incomesByCategory, err := s.reportByCategory(ctx, familyID, "income", start, end)
+	if err != nil {
+		return domain.ReportsOverview{}, err
+	}
+	incomeTotals, err := s.reportTotalsByType(ctx, familyID, "income", start, end)
+	if err != nil {
+		return domain.ReportsOverview{}, err
+	}
+
+	accounts, err := s.ListAccountsByFamily(ctx, familyID)
+	if err != nil {
+		return domain.ReportsOverview{}, err
+	}
+	accountReports := make([]domain.AccountBalanceReport, 0, len(accounts))
+	for _, account := range accounts {
+		accountReports = append(accountReports, domain.AccountBalanceReport{
+			AccountID:    account.ID,
+			AccountName:  account.Name,
+			AccountType:  account.Type,
+			Currency:     account.Currency,
+			BalanceMinor: account.BalanceMinor,
+			IsShared:     account.IsShared,
+			IsArchived:   account.IsArchived,
+		})
+	}
+
+	overview := domain.ReportsOverview{
+		Period: domain.ReportPeriod{Start: start, End: end},
+		Expenses: domain.MovementReport{
+			Totals:     expenseTotals,
+			ByCategory: expensesByCategory,
+		},
+		Incomes: domain.MovementReport{
+			Totals:     incomeTotals,
+			ByCategory: incomesByCategory,
+		},
+		AccountBalances: accountReports,
+	}
+	return overview, nil
+}
+
 func (s *Store) CreatePlannedOperation(ctx context.Context, op *domain.PlannedOperation) error {
 	row := s.db.QueryRowContext(ctx, `SELECT family_id, is_archived FROM accounts WHERE id = ?`, op.AccountID)
 	var accountFamily string

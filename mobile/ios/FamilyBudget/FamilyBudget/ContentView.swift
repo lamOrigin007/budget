@@ -104,6 +104,9 @@ struct ContentView: View {
     @State private var isPlannedLoading: Bool = false
     @State private var isSavingPlan: Bool = false
     @State private var completingPlanId: String? = nil
+    @State private var reportsOverview: ReportsOverview? = nil
+    @State private var reportsMessage: String = ""
+    @State private var isReportsLoading: Bool = false
 
     var body: some View {
         NavigationView {
@@ -182,6 +185,7 @@ struct ContentView: View {
                     transactionFilters()
                     transactionForm(user: user)
                     transactionsHistory()
+                    reportsSection()
                 }
                 .padding()
                 .background(.thinMaterial)
@@ -235,28 +239,32 @@ struct ContentView: View {
                 return
             }
 
-            DispatchQueue.main.async {
-                user = registerResponse.user
-                family = registerResponse.family
-                status = "Профиль создан для \(registerResponse.user.name)"
-                accounts = registerResponse.accounts.sorted { $0.createdAt < $1.createdAt }
-                ensureTransactionAccountSelection()
-                accountCurrencyInput = registerResponse.user.currencyDefault
-                familyMembers = registerResponse.members.sorted { $0.name < $1.name }
-                membersMessage = ""
-                familyIdInput = ""
-                accountShared = true
-                plannedAccountId = registerResponse.accounts.first?.id ?? ""
-                plannedOperations = []
-                completedPlannedOperations = []
-                plannedMessage = ""
-                refreshTransactionsForCurrentPeriod()
-            }
+                DispatchQueue.main.async {
+                    user = registerResponse.user
+                    family = registerResponse.family
+                    status = "Профиль создан для \(registerResponse.user.name)"
+                    accounts = registerResponse.accounts.sorted { $0.createdAt < $1.createdAt }
+                    ensureTransactionAccountSelection()
+                    accountCurrencyInput = registerResponse.user.currencyDefault
+                    familyMembers = registerResponse.members.sorted { $0.name < $1.name }
+                    membersMessage = ""
+                    familyIdInput = ""
+                    accountShared = true
+                    plannedAccountId = registerResponse.accounts.first?.id ?? ""
+                    plannedOperations = []
+                    completedPlannedOperations = []
+                    plannedMessage = ""
+                    reportsOverview = nil
+                    reportsMessage = ""
+                    isReportsLoading = false
+                    refreshTransactionsForCurrentPeriod()
+                }
 
-            loadCategories(userId: registerResponse.user.id)
-            loadAccounts(userId: registerResponse.user.id)
-            loadMembers(userId: registerResponse.user.id)
-            loadPlannedOperations(for: registerResponse.user.id)
+                loadCategories(userId: registerResponse.user.id)
+                loadAccounts(userId: registerResponse.user.id)
+                loadMembers(userId: registerResponse.user.id)
+                loadPlannedOperations(for: registerResponse.user.id)
+                loadReportsForCurrentPeriod()
         }.resume()
     }
 
@@ -545,6 +553,7 @@ struct ContentView: View {
                 accountMessage = "Счёт добавлен"
                 loadAccounts(userId: userId)
                 transactionAccountId = response.account.id
+                loadReportsForCurrentPeriod()
             }
         }.resume()
     }
@@ -556,11 +565,14 @@ struct ContentView: View {
         guard start <= end else {
             transactionsError = "Дата начала не может быть позже даты окончания"
             transactions = []
+            reportsMessage = "Дата начала не может быть позже даты окончания"
+            reportsOverview = nil
             return
         }
 
         transactionsError = ""
         isLoadingTransactions = true
+        loadReportsForCurrentPeriod(using: (start, end))
 
         guard var components = URLComponents(string: "http://localhost:8080/api/v1/users/\(user.id)/transactions") else {
             isLoadingTransactions = false
@@ -610,6 +622,62 @@ struct ContentView: View {
             }
             DispatchQueue.main.async {
                 transactions = response.transactions.sorted { $0.occurredAt > $1.occurredAt }
+            }
+        }.resume()
+    }
+
+    private func loadReportsForCurrentPeriod(using range: (start: Date, end: Date)? = nil) {
+        guard let user = user else { return }
+        let start: Date
+        let end: Date
+        if let range = range {
+            start = range.start
+            end = range.end
+        } else {
+            start = startOfDayUTC(transactionPeriodStart)
+            end = endOfDayUTC(transactionPeriodEnd)
+            guard start <= end else {
+                reportsMessage = "Дата начала не может быть позже даты окончания"
+                reportsOverview = nil
+                return
+            }
+        }
+
+        guard var components = URLComponents(string: "http://localhost:8080/api/v1/users/\(user.id)/reports/overview") else {
+            return
+        }
+        components.queryItems = [
+            URLQueryItem(name: "start_date", value: isoFormatter.string(from: start)),
+            URLQueryItem(name: "end_date", value: isoFormatter.string(from: end))
+        ]
+        guard let url = components.url else { return }
+
+        DispatchQueue.main.async {
+            isReportsLoading = true
+            reportsMessage = ""
+        }
+
+        URLSession.shared.dataTask(with: url) { data, _, error in
+            DispatchQueue.main.async {
+                isReportsLoading = false
+            }
+            if let error = error {
+                DispatchQueue.main.async {
+                    reportsMessage = "Не удалось загрузить отчёты: \(error.localizedDescription)"
+                    reportsOverview = nil
+                }
+                return
+            }
+            guard let data = data,
+                  let response = try? JSONDecoder().decode(ReportsOverviewResponse.self, from: data) else {
+                DispatchQueue.main.async {
+                    reportsMessage = "Некорректный ответ сервера при загрузке отчётов"
+                    reportsOverview = nil
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                reportsOverview = response.reports
             }
         }.resume()
     }
@@ -688,6 +756,7 @@ struct ContentView: View {
                 transactionComment = ""
                 transactionMessage = "Операция сохранена"
                 loadAccounts(userId: user.id)
+                loadReportsForCurrentPeriod()
             }
         }.resume()
     }
@@ -885,6 +954,7 @@ struct ContentView: View {
                 plannedMessage = "Операция выполнена"
                 loadAccounts(userId: user.id)
                 refreshTransactionsForCurrentPeriod()
+                loadReportsForCurrentPeriod()
             }
         }.resume()
     }
@@ -1425,6 +1495,145 @@ struct ContentView: View {
     }
 
     @ViewBuilder
+    private func reportsSection() -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Отчёты за период")
+                    .font(.headline)
+                Spacer()
+                Button("Обновить отчёты") {
+                    loadReportsForCurrentPeriod()
+                }
+                .buttonStyle(.bordered)
+                .disabled(isReportsLoading)
+            }
+            Text("Используется выбранный период фильтра операций.")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+
+            if isReportsLoading {
+                ProgressView()
+            }
+
+            if !reportsMessage.isEmpty {
+                Text(reportsMessage)
+                    .font(.footnote)
+                    .foregroundColor(reportsMessage.hasPrefix("Не удалось") || reportsMessage.hasPrefix("Дата") ? .red : .secondary)
+            }
+
+            if !isReportsLoading && reportsMessage.isEmpty {
+                if let overview = reportsOverview {
+                    VStack(alignment: .leading, spacing: 12) {
+                        movementReportBlock(title: "Расходы по категориям", report: overview.expenses, amountColor: .red)
+                        movementReportBlock(title: "Доходы", report: overview.incomes, amountColor: .green)
+                        accountBalancesBlock(overview.accountBalances)
+                    }
+                } else {
+                    Text("Добавьте операции, чтобы увидеть распределение доходов, расходов и баланс по счетам семьи.")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(12)
+    }
+
+    @ViewBuilder
+    private func movementReportBlock(title: String, report: MovementReport, amountColor: Color) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .fontWeight(.semibold)
+            if let totals = formatTotals(report.totals) {
+                Text("Итого: \(totals)")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+            if report.byCategory.isEmpty {
+                Text("Нет данных за выбранный период.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            } else {
+                ForEach(report.byCategory, id: \.identifier) { item in
+                    HStack {
+                        Text(item.categoryName)
+                        Spacer()
+                        Text(formatMoney(item.amountMinor, currency: item.currency))
+                            .foregroundColor(amountColor)
+                            .fontWeight(.semibold)
+                    }
+                    .font(.footnote)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func accountBalancesBlock(_ balances: [AccountBalanceReport]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Баланс по счетам")
+                .fontWeight(.semibold)
+            let totalsDict = balances.reduce(into: [String: Int64]()) { result, account in
+                result[account.currency, default: 0] += account.balanceMinor
+            }
+            let totalsList = totalsDict.map { CurrencyAmount(currency: $0.key, amountMinor: $0.value) }
+            if let totals = formatTotals(totalsList) {
+                Text("Суммарно: \(totals)")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+            if balances.isEmpty {
+                Text("Добавьте счета, чтобы видеть остатки семьи.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            } else {
+                ForEach(balances, id: \.accountId) { account in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(account.accountName)
+                            .fontWeight(.semibold)
+                        Text("Тип: \(accountTypeLabel(account.accountType))")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                        Text(account.isShared ? "Общий счёт семьи" : "Личный счёт")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                        if account.isArchived {
+                            Text("Счёт в архиве")
+                                .font(.footnote)
+                                .foregroundColor(.orange)
+                        }
+                        Text("Баланс: \(formatMoney(account.balanceMinor, currency: account.currency))")
+                            .font(.footnote)
+                            .fontWeight(.semibold)
+                    }
+                    .padding(8)
+                    .background(Color.gray.opacity(0.12))
+                    .cornerRadius(8)
+                }
+            }
+        }
+    }
+
+    private func formatMoney(_ amountMinor: Int64, currency: String) -> String {
+        let amount = Double(amountMinor) / 100.0
+        return String(format: "%.2f %@", amount, currency)
+    }
+
+    private func formatTotals(_ totals: [CurrencyAmount]) -> String? {
+        guard !totals.isEmpty else { return nil }
+        return totals
+            .map { formatMoney($0.amountMinor, currency: $0.currency) }
+            .joined(separator: " · ")
+    }
+
+    private func accountTypeLabel(_ type: String) -> String {
+        if let kind = AccountKind(rawValue: type) {
+            return kind.localizedTitle
+        }
+        return type
+    }
+
     private func transactionsHistory() -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("История операций")
@@ -1527,6 +1736,106 @@ struct ContentView: View {
             return category.name
         }
         return "Без родителя"
+    }
+}
+
+private struct ReportsOverviewResponse: Decodable {
+    let reports: ReportsOverview
+}
+
+private struct ReportsOverview: Decodable {
+    let period: ReportPeriod
+    let expenses: MovementReport
+    let incomes: MovementReport
+    let accountBalances: [AccountBalanceReport]
+
+    enum CodingKeys: String, CodingKey {
+        case period
+        case expenses
+        case incomes
+        case accountBalances = "account_balances"
+    }
+}
+
+private struct ReportPeriod: Decodable {
+    let startDate: Date?
+    let endDate: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case startDate = "start_date"
+        case endDate = "end_date"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let rawStart = try container.decodeIfPresent(String.self, forKey: .startDate) {
+            startDate = isoFormatter.date(from: rawStart)
+        } else {
+            startDate = nil
+        }
+        if let rawEnd = try container.decodeIfPresent(String.self, forKey: .endDate) {
+            endDate = isoFormatter.date(from: rawEnd)
+        } else {
+            endDate = nil
+        }
+    }
+}
+
+private struct MovementReport: Decodable {
+    let totals: [CurrencyAmount]
+    let byCategory: [CategoryReportItem]
+
+    enum CodingKeys: String, CodingKey {
+        case totals
+        case byCategory = "by_category"
+    }
+}
+
+private struct CurrencyAmount: Decodable {
+    let currency: String
+    let amountMinor: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case currency
+        case amountMinor = "amount_minor"
+    }
+}
+
+private struct CategoryReportItem: Decodable {
+    let categoryId: String
+    let categoryName: String
+    let categoryColor: String
+    let currency: String
+    let amountMinor: Int64
+
+    var identifier: String { "\(categoryId)-\(currency)" }
+
+    enum CodingKeys: String, CodingKey {
+        case categoryId = "category_id"
+        case categoryName = "category_name"
+        case categoryColor = "category_color"
+        case currency
+        case amountMinor = "amount_minor"
+    }
+}
+
+private struct AccountBalanceReport: Decodable {
+    let accountId: String
+    let accountName: String
+    let accountType: String
+    let currency: String
+    let balanceMinor: Int64
+    let isShared: Bool
+    let isArchived: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case accountId = "account_id"
+        case accountName = "account_name"
+        case accountType = "account_type"
+        case currency
+        case balanceMinor = "balance_minor"
+        case isShared = "is_shared"
+        case isArchived = "is_archived"
     }
 }
 
