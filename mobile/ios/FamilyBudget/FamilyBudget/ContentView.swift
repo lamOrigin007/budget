@@ -90,6 +90,7 @@ struct ContentView: View {
     @State private var transactionFilterType: TransactionTypeFilter = .all
     @State private var transactionFilterCategoryId: String = ""
     @State private var transactionFilterAccountId: String = ""
+    @State private var transactionFilterUserId: String = ""
     @State private var plannedOperations: [PlannedOperation] = []
     @State private var completedPlannedOperations: [PlannedOperation] = []
     @State private var plannedType: TransactionKind = .expense
@@ -107,6 +108,18 @@ struct ContentView: View {
     @State private var reportsOverview: ReportsOverview? = nil
     @State private var reportsMessage: String = ""
     @State private var isReportsLoading: Bool = false
+    @State private var settingsSummary: UserSettingsSummary? = nil
+    @State private var isSettingsLoading = false
+    @State private var isSettingsSaving = false
+    @State private var settingsMessage: String = ""
+    @State private var familyCurrencySetting: String = "RUB"
+    @State private var userCurrencySetting: String = "RUB"
+    @State private var localeSetting: String = "ru-RU"
+    @State private var themeSetting: String = "system"
+    @State private var densitySetting: String = "comfortable"
+    @State private var showArchivedSetting: Bool = false
+    @State private var showTotalsSetting: Bool = true
+    @State private var supportedCurrencies: [String] = ["RUB", "USD", "EUR"]
 
     var body: some View {
         NavigationView {
@@ -176,6 +189,7 @@ struct ContentView: View {
                                 .foregroundColor(.secondary)
                         }
                     }
+                    settingsSection(user: user)
                     membersSection(userId: user.id)
                     accountsSection(userId: user.id)
                     categoryForm(userId: user.id)
@@ -246,6 +260,13 @@ struct ContentView: View {
                     accounts = registerResponse.accounts.sorted { $0.createdAt < $1.createdAt }
                     ensureTransactionAccountSelection()
                     accountCurrencyInput = registerResponse.user.currencyDefault
+                    categories = registerResponse.categories.sorted { lhs, rhs in
+                        if lhs.isArchived == rhs.isArchived {
+                            return lhs.name < rhs.name
+                        }
+                        return !lhs.isArchived && rhs.isArchived
+                    }
+                    ensureTransactionCategorySelection()
                     familyMembers = registerResponse.members.sorted { $0.name < $1.name }
                     membersMessage = ""
                     familyIdInput = ""
@@ -257,6 +278,14 @@ struct ContentView: View {
                     reportsOverview = nil
                     reportsMessage = ""
                     isReportsLoading = false
+                    familyCurrencySetting = registerResponse.family.currencyBase
+                    userCurrencySetting = registerResponse.user.currencyDefault
+                    localeSetting = registerResponse.user.locale
+                    themeSetting = registerResponse.user.displaySettings.theme
+                    densitySetting = registerResponse.user.displaySettings.density
+                    showArchivedSetting = registerResponse.user.displaySettings.showArchived
+                    showTotalsSetting = registerResponse.user.displaySettings.showTotalsInFamilyCurrency
+                    settingsMessage = ""
                     refreshTransactionsForCurrentPeriod()
                 }
 
@@ -265,6 +294,7 @@ struct ContentView: View {
                 loadMembers(userId: registerResponse.user.id)
                 loadPlannedOperations(for: registerResponse.user.id)
                 loadReportsForCurrentPeriod()
+                loadSettings(userId: registerResponse.user.id)
         }.resume()
     }
 
@@ -341,6 +371,252 @@ struct ContentView: View {
                 }
             }
         }.resume()
+    }
+
+    private func loadSettings(userId: String) {
+        guard let url = URL(string: "http://localhost:8080/api/v1/users/\(userId)/settings") else { return }
+        DispatchQueue.main.async {
+            isSettingsLoading = true
+            settingsMessage = ""
+        }
+        URLSession.shared.dataTask(with: url) { data, _, error in
+            DispatchQueue.main.async {
+                isSettingsLoading = false
+            }
+            if let error = error {
+                DispatchQueue.main.async {
+                    settingsMessage = "Не удалось загрузить настройки: \(error.localizedDescription)"
+                }
+                return
+            }
+            guard let data = data,
+                  let summary = try? JSONDecoder().decode(UserSettingsSummary.self, from: data) else {
+                DispatchQueue.main.async {
+                    settingsMessage = "Некорректный ответ сервера при загрузке настроек"
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                applySettingsSummary(summary, message: nil)
+            }
+        }.resume()
+    }
+
+    private func saveSettings(for user: User) {
+        guard let url = URL(string: "http://localhost:8080/api/v1/users/\(user.id)/settings") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let payload = UpdateUserSettingsPayload(
+            familyCurrency: user.role == "owner" ? familyCurrencySetting.uppercased() : nil,
+            userCurrency: userCurrencySetting.uppercased(),
+            locale: localeSetting,
+            display: DisplaySettings(
+                theme: themeSetting,
+                density: densitySetting,
+                showArchived: showArchivedSetting,
+                showTotalsInFamilyCurrency: showTotalsSetting
+            )
+        )
+
+        request.httpBody = try? JSONEncoder().encode(payload)
+
+        DispatchQueue.main.async {
+            isSettingsSaving = true
+            settingsMessage = ""
+        }
+
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            DispatchQueue.main.async {
+                isSettingsSaving = false
+            }
+            if let error = error {
+                DispatchQueue.main.async {
+                    settingsMessage = "Не удалось сохранить настройки: \(error.localizedDescription)"
+                }
+                return
+            }
+            guard let data = data,
+                  let summary = try? JSONDecoder().decode(UserSettingsSummary.self, from: data) else {
+                DispatchQueue.main.async {
+                    settingsMessage = "Некорректный ответ сервера при сохранении настроек"
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                applySettingsSummary(summary, message: "Настройки обновлены")
+            }
+        }.resume()
+    }
+
+    private func applySettingsSummary(_ summary: UserSettingsSummary, message: String?) {
+        settingsSummary = summary
+        supportedCurrencies = summary.supportedCurrencies.map { $0.uppercased() }.sorted()
+        familyCurrencySetting = summary.family.currencyBase.uppercased()
+        userCurrencySetting = summary.user.currencyDefault.uppercased()
+        localeSetting = summary.user.locale
+        themeSetting = summary.user.display.theme
+        densitySetting = summary.user.display.density
+        showArchivedSetting = summary.user.display.showArchived
+        showTotalsSetting = summary.user.display.showTotalsInFamilyCurrency
+
+        categories = summary.categories.sorted { lhs, rhs in
+            if lhs.isArchived == rhs.isArchived {
+                return lhs.name < rhs.name
+            }
+            return !lhs.isArchived && rhs.isArchived
+        }
+        ensureTransactionCategorySelection()
+        if plannedCategoryId.isEmpty || !summary.categories.contains(where: { $0.id == plannedCategoryId && !$0.isArchived && $0.type == plannedType.rawValue }) {
+            plannedCategoryId = summary.categories.first { !$0.isArchived && $0.type == plannedType.rawValue }?.id ?? ""
+        }
+
+        accounts = summary.accounts.sorted { $0.createdAt < $1.createdAt }
+        ensureTransactionAccountSelection()
+        if plannedAccountId.isEmpty || !summary.accounts.contains(where: { $0.id == plannedAccountId }) {
+            plannedAccountId = summary.accounts.first?.id ?? ""
+        }
+
+        accountCurrencyInput = summary.user.currencyDefault
+
+        if let currentUser = user {
+            user = User(
+                id: currentUser.id,
+                familyId: currentUser.familyId,
+                email: currentUser.email,
+                name: currentUser.name,
+                role: currentUser.role,
+                locale: summary.user.locale,
+                currencyDefault: summary.user.currencyDefault,
+                displaySettings: summary.user.display
+            )
+        } else {
+            user = User(
+                id: summary.user.id,
+                familyId: summary.family.id,
+                email: "",
+                name: "",
+                role: "",
+                locale: summary.user.locale,
+                currencyDefault: summary.user.currencyDefault,
+                displaySettings: summary.user.display
+            )
+        }
+
+        family = Family(id: summary.family.id, name: summary.family.name, currencyBase: summary.family.currencyBase)
+
+        if let message = message {
+            settingsMessage = message
+        } else {
+            settingsMessage = ""
+        }
+    }
+
+    @ViewBuilder
+    private func settingsSection(user: User) -> some View {
+        let presets = Array(Set(supportedCurrencies.map { $0.uppercased() })).sorted()
+        let familyCurrencyBinding = Binding(
+            get: { familyCurrencySetting },
+            set: { familyCurrencySetting = $0.uppercased() }
+        )
+        let userCurrencyBinding = Binding(
+            get: { userCurrencySetting },
+            set: { userCurrencySetting = $0.uppercased() }
+        )
+
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Настройки отображения")
+                    .font(.headline)
+                Spacer()
+                if isSettingsSaving {
+                    ProgressView()
+                }
+            }
+
+            if isSettingsLoading {
+                Text("Загрузка текущих параметров…")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+
+            if !settingsMessage.isEmpty {
+                Text(settingsMessage)
+                    .font(.footnote)
+                    .foregroundColor(settingsMessage.hasPrefix("Не удалось") ? .red : .secondary)
+            }
+
+            if user.role == "owner" {
+                TextField("Базовая валюта семьи", text: familyCurrencyBinding)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(isSettingsLoading || isSettingsSaving)
+                    .textInputAutocapitalization(.characters)
+                if !presets.isEmpty {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 60), spacing: 8)], alignment: .leading, spacing: 8) {
+                        ForEach(presets, id: \.self) { code in
+                            Button(code) {
+                                familyCurrencySetting = code
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(isSettingsLoading || isSettingsSaving)
+                        }
+                    }
+                }
+            }
+
+            TextField("Валюта по умолчанию", text: userCurrencyBinding)
+                .textFieldStyle(.roundedBorder)
+                .disabled(isSettingsLoading || isSettingsSaving)
+                .textInputAutocapitalization(.characters)
+
+            TextField("Локаль", text: $localeSetting)
+                .textFieldStyle(.roundedBorder)
+                .disabled(isSettingsLoading || isSettingsSaving)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Тема")
+                    .font(.subheadline)
+                Picker("Тема", selection: $themeSetting) {
+                    Text("Система").tag("system")
+                    Text("Светлая").tag("light")
+                    Text("Тёмная").tag("dark")
+                }
+                .pickerStyle(.segmented)
+                .disabled(isSettingsLoading || isSettingsSaving)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Плотность")
+                    .font(.subheadline)
+                Picker("Плотность", selection: $densitySetting) {
+                    Text("Комфортная").tag("comfortable")
+                    Text("Компактная").tag("compact")
+                }
+                .pickerStyle(.segmented)
+                .disabled(isSettingsLoading || isSettingsSaving)
+            }
+
+            Toggle("Показывать архивные категории", isOn: $showArchivedSetting)
+                .disabled(isSettingsLoading || isSettingsSaving)
+                .onChange(of: showArchivedSetting) { _ in
+                    ensureTransactionCategorySelection()
+                    ensureTransactionAccountSelection()
+                }
+
+            Toggle("Сводные суммы только в валюте семьи", isOn: $showTotalsSetting)
+                .disabled(isSettingsLoading || isSettingsSaving)
+
+            Button(action: { saveSettings(for: user) }) {
+                Text(isSettingsSaving ? "Сохранение…" : "Сохранить настройки")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isSettingsLoading || isSettingsSaving)
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .cornerRadius(16)
     }
 
     private func membersSection(userId: String) -> some View {
@@ -795,12 +1071,24 @@ struct ContentView: View {
     }
 
     private func ensureTransactionAccountSelection() {
-        if !transactionAccountId.isEmpty, accounts.contains(where: { $0.id == transactionAccountId }) {
-            return
+        let preferredAccounts = showArchivedSetting ? accounts : accounts.filter { !$0.isArchived }
+        if !transactionAccountId.isEmpty, let current = accounts.first(where: { $0.id == transactionAccountId }) {
+            if showArchivedSetting || !current.isArchived {
+                // keep current selection
+            } else {
+                transactionAccountId = preferredAccounts.first?.id ?? accounts.first?.id ?? ""
+            }
+        } else {
+            transactionAccountId = preferredAccounts.first?.id ?? accounts.first?.id ?? ""
         }
-        transactionAccountId = accounts.first?.id ?? ""
-        if !transactionFilterAccountId.isEmpty, !accounts.contains(where: { $0.id == transactionFilterAccountId }) {
-            transactionFilterAccountId = ""
+        if !transactionFilterAccountId.isEmpty {
+            if let filterAccount = accounts.first(where: { $0.id == transactionFilterAccountId }) {
+                if !showArchivedSetting && filterAccount.isArchived {
+                    transactionFilterAccountId = ""
+                }
+            } else {
+                transactionFilterAccountId = ""
+            }
         }
     }
 
@@ -1186,12 +1474,13 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Счета и кошельки")
                 .font(.headline)
-            if accounts.isEmpty {
+            let visibleAccounts = showArchivedSetting ? accounts : accounts.filter { !$0.isArchived }
+            if visibleAccounts.isEmpty {
                 Text("Создайте первый счёт, чтобы учитывать наличные, карты и вклады.")
                     .font(.footnote)
                     .foregroundColor(.secondary)
             } else {
-                ForEach(accounts) { account in
+                ForEach(visibleAccounts) { account in
                     Button(action: {
                         transactionAccountId = account.id
                     }) {
@@ -1215,7 +1504,10 @@ struct ContentView: View {
                 }
             }
 
-            TextField("Валюта", text: $accountCurrencyInput)
+            TextField("Валюта", text: Binding(
+                get: { accountCurrencyInput },
+                set: { accountCurrencyInput = $0.uppercased() }
+            ))
                 .textFieldStyle(.roundedBorder)
                 .textInputAutocapitalization(.characters)
 
@@ -1302,7 +1594,7 @@ struct ContentView: View {
     @ViewBuilder
     private func categoryLists(userId: String) -> some View {
         let active = activeCategories
-        let archived = archivedCategories
+        let archived = showArchivedSetting ? archivedCategories : []
         if active.isEmpty && archived.isEmpty {
             Text("Добавьте первую категорию, чтобы фиксировать движения средств")
                 .font(.subheadline)
@@ -1622,8 +1914,16 @@ struct ContentView: View {
 
     private func formatTotals(_ totals: [CurrencyAmount]) -> String? {
         guard !totals.isEmpty else { return nil }
-        return totals
-            .map { formatMoney($0.amountMinor, currency: $0.currency) }
+        let familyCurrency = familyCurrencySetting.isEmpty ? family?.currencyBase ?? "" : familyCurrencySetting
+        let filtered: [CurrencyAmount]
+        if showTotalsSetting, !familyCurrency.isEmpty {
+            filtered = totals.filter { $0.currency.caseInsensitiveCompare(familyCurrency) == .orderedSame }
+        } else {
+            filtered = totals
+        }
+        guard !filtered.isEmpty else { return nil }
+        return filtered
+            .map { formatMoney($0.amountMinor, currency: $0.currency.uppercased()) }
             .joined(separator: " · ")
     }
 
@@ -1671,6 +1971,11 @@ struct ContentView: View {
                 Text(account.isShared ? "Общий счёт семьи" : "Личный счёт")
                     .font(.footnote)
                     .foregroundColor(.secondary)
+                if account.isArchived {
+                    Text("Счёт в архиве")
+                        .font(.footnote)
+                        .foregroundColor(.orange)
+                }
                 if isSelected {
                     Label("Используется для операций", systemImage: "checkmark.circle.fill")
                         .font(.footnote)
@@ -1860,6 +2165,21 @@ private struct RegisterResponse: Codable {
     let family: Family
     let accounts: [Account]
     let members: [FamilyMember]
+    let categories: [Category]
+}
+
+private struct DisplaySettings: Codable {
+    let theme: String
+    let density: String
+    let showArchived: Bool
+    let showTotalsInFamilyCurrency: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case theme
+        case density
+        case showArchived = "show_archived"
+        case showTotalsInFamilyCurrency = "show_totals_in_family_currency"
+    }
 }
 
 private struct User: Codable {
@@ -1870,6 +2190,7 @@ private struct User: Codable {
     let role: String
     let locale: String
     let currencyDefault: String
+    let displaySettings: DisplaySettings
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -1879,6 +2200,7 @@ private struct User: Codable {
         case role
         case locale
         case currencyDefault = "currency_default"
+        case displaySettings = "display_settings"
     }
 }
 
@@ -1891,6 +2213,62 @@ private struct Family: Codable {
         case id
         case name
         case currencyBase = "currency_base"
+    }
+}
+
+private struct FamilySettings: Decodable {
+    let id: String
+    let name: String
+    let currencyBase: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case currencyBase = "currency_base"
+    }
+}
+
+private struct UserSettingsSummary: Decodable {
+    let supportedCurrencies: [String]
+    let family: FamilySettings
+    let user: UserSettings
+    let categories: [Category]
+    let accounts: [Account]
+
+    enum CodingKeys: String, CodingKey {
+        case supportedCurrencies = "supported_currencies"
+        case family
+        case user
+        case categories
+        case accounts
+    }
+}
+
+private struct UserSettings: Decodable {
+    let id: String
+    let locale: String
+    let currencyDefault: String
+    let display: DisplaySettings
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case locale
+        case currencyDefault = "currency_default"
+        case display
+    }
+}
+
+private struct UpdateUserSettingsPayload: Encodable {
+    let familyCurrency: String?
+    let userCurrency: String
+    let locale: String
+    let display: DisplaySettings
+
+    enum CodingKeys: String, CodingKey {
+        case familyCurrency = "family_currency"
+        case userCurrency = "user_currency"
+        case locale
+        case display
     }
 }
 

@@ -64,6 +64,51 @@ paths:
                     $ref: '#/components/schemas/Family'
         '404':
           description: Not found
+  /api/v1/users/{id}/settings:
+    get:
+      summary: Получить настройки пользователя и семьи
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Настройки пользователя
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserSettingsResponse'
+        '404':
+          description: Not found
+    put:
+      summary: Обновить настройки пользователя и семьи
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserSettingsRequest'
+      responses:
+        '200':
+          description: Обновлённые настройки
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserSettingsResponse'
+        '400':
+          description: Validation error
+        '403':
+          description: Forbidden
+        '404':
+          description: Not found
   /api/v1/users/{id}/categories:
     get:
       summary: List categories for user family
@@ -457,12 +502,79 @@ components:
           type: string
         currency_default:
           type: string
+        display_settings:
+          $ref: '#/components/schemas/DisplaySettings'
         created_at:
           type: string
           format: date-time
         updated_at:
           type: string
           format: date-time
+    DisplaySettings:
+      type: object
+      required: [theme, density, show_archived, show_totals_in_family_currency]
+      properties:
+        theme:
+          type: string
+          enum: [system, light, dark]
+        density:
+          type: string
+          enum: [comfortable, compact]
+        show_archived:
+          type: boolean
+        show_totals_in_family_currency:
+          type: boolean
+    FamilySettings:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        currency_base:
+          type: string
+    UserSettings:
+      type: object
+      properties:
+        id:
+          type: string
+        locale:
+          type: string
+        currency_default:
+          type: string
+        display:
+          $ref: '#/components/schemas/DisplaySettings'
+    UserSettingsResponse:
+      type: object
+      properties:
+        supported_currencies:
+          type: array
+          items:
+            type: string
+        family:
+          $ref: '#/components/schemas/FamilySettings'
+        user:
+          $ref: '#/components/schemas/UserSettings'
+        categories:
+          type: array
+          items:
+            $ref: '#/components/schemas/Category'
+        accounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Account'
+    UpdateUserSettingsRequest:
+      type: object
+      required: [user_currency, locale, display]
+      properties:
+        family_currency:
+          type: string
+        user_currency:
+          type: string
+        locale:
+          type: string
+        display:
+          $ref: '#/components/schemas/DisplaySettings'
     Family:
       type: object
       properties:

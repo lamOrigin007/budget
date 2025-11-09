@@ -16,8 +16,16 @@ export interface User {
   role: string;
   locale: string;
   currency_default: string;
+  display_settings: DisplaySettings;
   created_at: string;
   updated_at: string;
+}
+
+export interface DisplaySettings {
+  theme: 'system' | 'light' | 'dark';
+  density: 'comfortable' | 'compact';
+  show_archived: boolean;
+  show_totals_in_family_currency: boolean;
 }
 
 export interface Family {
@@ -177,6 +185,30 @@ export interface ReportsOverview {
   expenses: MovementReport;
   incomes: MovementReport;
   account_balances: AccountBalanceReport[];
+}
+
+export interface UserSettingsSummary {
+  supported_currencies: string[];
+  family: {
+    id: string;
+    name: string;
+    currency_base: string;
+  };
+  user: {
+    id: string;
+    locale: string;
+    currency_default: string;
+    display: DisplaySettings;
+  };
+  categories: Category[];
+  accounts: Account[];
+}
+
+export interface UpdateUserSettingsPayload {
+  family_currency?: string;
+  user_currency: string;
+  locale: string;
+  display: DisplaySettings;
 }
 
 export interface RegisterResponse {
@@ -358,6 +390,20 @@ export async function createPlannedOperation(
     body: JSON.stringify(payload)
   });
   return data.planned_operation;
+}
+
+export async function fetchUserSettings(userId: string): Promise<UserSettingsSummary> {
+  return request<UserSettingsSummary>(`/api/v1/users/${userId}/settings`);
+}
+
+export async function updateUserSettings(
+  userId: string,
+  payload: UpdateUserSettingsPayload
+): Promise<UserSettingsSummary> {
+  return request<UserSettingsSummary>(`/api/v1/users/${userId}/settings`, {
+    method: 'PUT',
+    body: JSON.stringify(payload)
+  });
 }
 
 export async function completePlannedOperation(

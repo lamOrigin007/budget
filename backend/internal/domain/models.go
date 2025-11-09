@@ -17,15 +17,32 @@ type FamilyMember struct {
 }
 
 type User struct {
-	ID              string    `json:"id"`
-	FamilyID        string    `json:"family_id"`
-	Email           string    `json:"email"`
-	Name            string    `json:"name"`
-	Role            string    `json:"role"`
-	Locale          string    `json:"locale"`
-	CurrencyDefault string    `json:"currency_default"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID              string          `json:"id"`
+	FamilyID        string          `json:"family_id"`
+	Email           string          `json:"email"`
+	Name            string          `json:"name"`
+	Role            string          `json:"role"`
+	Locale          string          `json:"locale"`
+	CurrencyDefault string          `json:"currency_default"`
+	DisplaySettings DisplaySettings `json:"display_settings"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+}
+
+type DisplaySettings struct {
+	Theme                      string `json:"theme"`
+	Density                    string `json:"density"`
+	ShowArchived               bool   `json:"show_archived"`
+	ShowTotalsInFamilyCurrency bool   `json:"show_totals_in_family_currency"`
+}
+
+func DefaultDisplaySettings() DisplaySettings {
+	return DisplaySettings{
+		Theme:                      "system",
+		Density:                    "comfortable",
+		ShowArchived:               false,
+		ShowTotalsInFamilyCurrency: true,
+	}
 }
 
 type Account struct {
