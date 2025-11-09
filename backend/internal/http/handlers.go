@@ -26,6 +26,8 @@ var (
 	errParentArchived = errors.New("parent category is archived")
 )
 
+var supportedCurrencies = []string{"RUB", "USD", "EUR", "KZT", "BYN", "UAH", "GBP"}
+
 type RegisterRequest struct {
 	Email      string `json:"email"`
 	Password   string `json:"password"`
@@ -42,6 +44,41 @@ type RegisterResponse struct {
 	Categories []domain.Category     `json:"categories"`
 	Accounts   []domain.Account      `json:"accounts"`
 	Members    []domain.FamilyMember `json:"members"`
+}
+
+type DisplaySettingsPayload struct {
+	Theme                      string `json:"theme"`
+	Density                    string `json:"density"`
+	ShowArchived               bool   `json:"show_archived"`
+	ShowTotalsInFamilyCurrency bool   `json:"show_totals_in_family_currency"`
+}
+
+type UserSettingsResponse struct {
+	SupportedCurrencies []string          `json:"supported_currencies"`
+	Family              familySettings    `json:"family"`
+	User                userSettings      `json:"user"`
+	Categories          []domain.Category `json:"categories"`
+	Accounts            []domain.Account  `json:"accounts"`
+}
+
+type familySettings struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	CurrencyBase string `json:"currency_base"`
+}
+
+type userSettings struct {
+	ID              string                 `json:"id"`
+	Locale          string                 `json:"locale"`
+	CurrencyDefault string                 `json:"currency_default"`
+	Display         domain.DisplaySettings `json:"display"`
+}
+
+type UpdateUserSettingsRequest struct {
+	FamilyCurrency string                 `json:"family_currency"`
+	UserCurrency   string                 `json:"user_currency"`
+	Locale         string                 `json:"locale"`
+	Display        DisplaySettingsPayload `json:"display"`
 }
 
 type CategoryRequest struct {
@@ -164,6 +201,7 @@ func (h *Handlers) RegisterUser(c echo.Context) error {
 		Role:            "owner",
 		Locale:          defaultLocale(req.Locale),
 		CurrencyDefault: strings.ToUpper(req.Currency),
+		DisplaySettings: domain.DefaultDisplaySettings(),
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
@@ -231,6 +269,180 @@ func (h *Handlers) GetUser(c echo.Context) error {
 		"user":   user,
 		"family": family,
 	})
+}
+
+func (h *Handlers) GetUserSettings(c echo.Context) error {
+	userID := c.Param("id")
+	user, err := h.store.GetUser(c.Request().Context(), userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+	}
+	family, err := h.store.GetFamily(c.Request().Context(), user.FamilyID)
+	if err != nil {
+		return err
+	}
+	if family == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "family not found"})
+	}
+	categories, err := h.store.ListCategoriesByFamily(c.Request().Context(), family.ID)
+	if err != nil {
+		return err
+	}
+	accounts, err := h.store.ListAccountsByFamily(c.Request().Context(), family.ID)
+	if err != nil {
+		return err
+	}
+
+	return c.JSON(http.StatusOK, UserSettingsResponse{
+		SupportedCurrencies: supportedCurrencies,
+		Family: familySettings{
+			ID:           family.ID,
+			Name:         family.Name,
+			CurrencyBase: family.CurrencyBase,
+		},
+		User: userSettings{
+			ID:              user.ID,
+			Locale:          user.Locale,
+			CurrencyDefault: user.CurrencyDefault,
+			Display:         user.DisplaySettings,
+		},
+		Categories: categories,
+		Accounts:   accounts,
+	})
+}
+
+func (h *Handlers) UpdateUserSettings(c echo.Context) error {
+	userID := c.Param("id")
+	user, err := h.store.GetUser(c.Request().Context(), userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+	}
+
+	var req UpdateUserSettingsRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+	}
+
+	family, err := h.store.GetFamily(c.Request().Context(), user.FamilyID)
+	if err != nil {
+		return err
+	}
+	if family == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "family not found"})
+	}
+
+	req.FamilyCurrency = strings.ToUpper(strings.TrimSpace(req.FamilyCurrency))
+	req.UserCurrency = strings.ToUpper(strings.TrimSpace(req.UserCurrency))
+	req.Locale = strings.TrimSpace(req.Locale)
+
+	if req.UserCurrency == "" {
+		req.UserCurrency = user.CurrencyDefault
+	}
+	if req.Locale == "" {
+		req.Locale = user.Locale
+	}
+
+	if !isSupportedCurrency(req.UserCurrency) {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "unsupported user currency"})
+	}
+	if req.FamilyCurrency != "" && !isSupportedCurrency(req.FamilyCurrency) {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "unsupported family currency"})
+	}
+
+	display, err := normalizeDisplaySettings(req.Display)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+
+	if req.FamilyCurrency != "" && req.FamilyCurrency != family.CurrencyBase {
+		if user.Role != "owner" {
+			return c.JSON(http.StatusForbidden, map[string]string{"error": "only owner can change family currency"})
+		}
+		updatedFamily, err := h.store.UpdateFamilyCurrency(c.Request().Context(), family.ID, req.FamilyCurrency)
+		if err != nil {
+			return err
+		}
+		family = updatedFamily
+	}
+
+	updatedUser, err := h.store.UpdateUserSettings(c.Request().Context(), user.ID, req.Locale, req.UserCurrency, display)
+	if err != nil {
+		return err
+	}
+
+	categories, err := h.store.ListCategoriesByFamily(c.Request().Context(), family.ID)
+	if err != nil {
+		return err
+	}
+	accounts, err := h.store.ListAccountsByFamily(c.Request().Context(), family.ID)
+	if err != nil {
+		return err
+	}
+
+	return c.JSON(http.StatusOK, UserSettingsResponse{
+		SupportedCurrencies: supportedCurrencies,
+		Family: familySettings{
+			ID:           family.ID,
+			Name:         family.Name,
+			CurrencyBase: family.CurrencyBase,
+		},
+		User: userSettings{
+			ID:              updatedUser.ID,
+			Locale:          updatedUser.Locale,
+			CurrencyDefault: updatedUser.CurrencyDefault,
+			Display:         updatedUser.DisplaySettings,
+		},
+		Categories: categories,
+		Accounts:   accounts,
+	})
+}
+
+func normalizeDisplaySettings(payload DisplaySettingsPayload) (domain.DisplaySettings, error) {
+	theme := strings.ToLower(strings.TrimSpace(payload.Theme))
+	if theme == "" {
+		theme = "system"
+	}
+	switch theme {
+	case "system", "light", "dark":
+	default:
+		return domain.DisplaySettings{}, fmt.Errorf("unknown theme %s", payload.Theme)
+	}
+
+	density := strings.ToLower(strings.TrimSpace(payload.Density))
+	if density == "" {
+		density = "comfortable"
+	}
+	switch density {
+	case "comfortable", "compact":
+	default:
+		return domain.DisplaySettings{}, fmt.Errorf("unknown density %s", payload.Density)
+	}
+
+	return domain.DisplaySettings{
+		Theme:                      theme,
+		Density:                    density,
+		ShowArchived:               payload.ShowArchived,
+		ShowTotalsInFamilyCurrency: payload.ShowTotalsInFamilyCurrency,
+	}, nil
+}
+
+func isSupportedCurrency(code string) bool {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if code == "" {
+		return false
+	}
+	for _, item := range supportedCurrencies {
+		if item == code {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handlers) ListCategories(c echo.Context) error {

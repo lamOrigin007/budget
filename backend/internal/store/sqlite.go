@@ -35,6 +35,7 @@ func migrate(db *sql.DB) error {
             role TEXT NOT NULL,
             locale TEXT NOT NULL,
             currency_default TEXT NOT NULL,
+            display_settings TEXT NOT NULL,
             created_at TIMESTAMP NOT NULL,
             updated_at TIMESTAMP NOT NULL
         );`,
@@ -97,6 +98,7 @@ func migrate(db *sql.DB) error {
 		`ALTER TABLE transactions ADD COLUMN account_id TEXT REFERENCES accounts(id);`,
 		`ALTER TABLE transactions ADD COLUMN comment TEXT;`,
 		`ALTER TABLE accounts ADD COLUMN is_shared INTEGER NOT NULL DEFAULT 1;`,
+		`ALTER TABLE users ADD COLUMN display_settings TEXT NOT NULL DEFAULT '{"theme":"system","density":"comfortable","show_archived":false,"show_totals_in_family_currency":true}';`,
 	}
 
 	for _, stmt := range alterStatements {

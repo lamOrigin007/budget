@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -46,9 +47,13 @@ func (s *Store) CreateFamily(ctx context.Context, name, currency string) (*domai
 }
 
 func (s *Store) CreateUser(ctx context.Context, user *domain.User, passwordHash string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO users (id, family_id, email, password_hash, name, role, locale, currency_default, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		user.ID, user.FamilyID, user.Email, passwordHash, user.Name, user.Role, user.Locale, user.CurrencyDefault, user.CreatedAt, user.UpdatedAt)
+	settingsJSON, err := json.Marshal(user.DisplaySettings)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO users (id, family_id, email, password_hash, name, role, locale, currency_default, display_settings, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		user.ID, user.FamilyID, user.Email, passwordHash, user.Name, user.Role, user.Locale, user.CurrencyDefault, string(settingsJSON), user.CreatedAt, user.UpdatedAt)
 	return err
 }
 
@@ -116,27 +121,51 @@ func (s *Store) ListFamilyMembers(ctx context.Context, familyID string) ([]domai
 }
 
 func (s *Store) FindUserByEmail(ctx context.Context, email string) (*domain.User, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, family_id, email, name, role, locale, currency_default, created_at, updated_at FROM users WHERE email = ?`, email)
+	row := s.db.QueryRowContext(ctx, `SELECT id, family_id, email, name, role, locale, currency_default, display_settings, created_at, updated_at FROM users WHERE email = ?`, email)
+	return scanUser(row)
+}
+
+func (s *Store) GetUser(ctx context.Context, id string) (*domain.User, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, family_id, email, name, role, locale, currency_default, display_settings, created_at, updated_at FROM users WHERE id = ?`, id)
+	return scanUser(row)
+}
+
+func scanUser(row *sql.Row) (*domain.User, error) {
 	var user domain.User
-	if err := row.Scan(&user.ID, &user.FamilyID, &user.Email, &user.Name, &user.Role, &user.Locale, &user.CurrencyDefault, &user.CreatedAt, &user.UpdatedAt); err != nil {
+	var settingsRaw sql.NullString
+	if err := row.Scan(&user.ID, &user.FamilyID, &user.Email, &user.Name, &user.Role, &user.Locale, &user.CurrencyDefault, &settingsRaw, &user.CreatedAt, &user.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
+	}
+	if !settingsRaw.Valid || strings.TrimSpace(settingsRaw.String) == "" {
+		user.DisplaySettings = domain.DefaultDisplaySettings()
+		return &user, nil
+	}
+	if err := json.Unmarshal([]byte(settingsRaw.String), &user.DisplaySettings); err != nil {
+		user.DisplaySettings = domain.DefaultDisplaySettings()
 	}
 	return &user, nil
 }
 
-func (s *Store) GetUser(ctx context.Context, id string) (*domain.User, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, family_id, email, name, role, locale, currency_default, created_at, updated_at FROM users WHERE id = ?`, id)
-	var user domain.User
-	if err := row.Scan(&user.ID, &user.FamilyID, &user.Email, &user.Name, &user.Role, &user.Locale, &user.CurrencyDefault, &user.CreatedAt, &user.UpdatedAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
-		}
+func (s *Store) UpdateUserSettings(ctx context.Context, userID, locale, currency string, settings domain.DisplaySettings) (*domain.User, error) {
+	payload, err := json.Marshal(settings)
+	if err != nil {
 		return nil, err
 	}
-	return &user, nil
+	now := time.Now().UTC()
+	if _, err := s.db.ExecContext(ctx, `UPDATE users SET locale = ?, currency_default = ?, display_settings = ?, updated_at = ? WHERE id = ?`, locale, currency, string(payload), now, userID); err != nil {
+		return nil, err
+	}
+	return s.GetUser(ctx, userID)
+}
+
+func (s *Store) UpdateFamilyCurrency(ctx context.Context, familyID, currency string) (*domain.Family, error) {
+	if _, err := s.db.ExecContext(ctx, `UPDATE families SET currency_base = ? WHERE id = ?`, currency, familyID); err != nil {
+		return nil, err
+	}
+	return s.GetFamily(ctx, familyID)
 }
 
 func (s *Store) CreateCategory(ctx context.Context, category *domain.Category) error {

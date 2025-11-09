@@ -38,13 +38,16 @@ import {
   AccountPayload,
   Category,
   CategoryPayload,
+  DisplaySettings,
   FamilyMember,
   PlannedOperation,
   PlannedOperationPayload,
   PlannedOperationRecurrence,
   RegisterResponse,
   ReportsOverview,
-  Transaction
+  Transaction,
+  UpdateUserSettingsPayload,
+  UserSettingsSummary
 } from '../src/lib/api';
 import {
   registerUser,
@@ -59,7 +62,9 @@ import {
   fetchPlannedOperations,
   createPlannedOperation,
   completePlannedOperation,
-  fetchReportsOverview
+  fetchReportsOverview,
+  fetchUserSettings,
+  updateUserSettings
 } from '../src/lib/api';
 
 type Step = 'register' | 'dashboard';
@@ -72,10 +77,40 @@ const accountTypeLabels: Record<Account['type'], string> = {
   wallet: 'Электронный кошелёк'
 };
 
+const defaultDisplaySettings: DisplaySettings = {
+  theme: 'system',
+  density: 'comfortable',
+  show_archived: false,
+  show_totals_in_family_currency: true
+};
+
+function cloneDisplaySettings(value?: DisplaySettings): DisplaySettings {
+  if (!value) {
+    return { ...defaultDisplaySettings };
+  }
+  return { ...value };
+}
+
 export default function Home() {
   const [step, setStep] = useState<Step>('register');
   const [registerError, setRegisterError] = useState<string | null>(null);
   const [userData, setUserData] = useState<RegisterResponse | null>(null);
+  const [settingsSummary, setSettingsSummary] = useState<UserSettingsSummary | null>(null);
+  const [isSettingsLoading, setIsSettingsLoading] = useState(false);
+  const [isSettingsSaving, setIsSettingsSaving] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsSuccess, setSettingsSuccess] = useState<string | null>(null);
+  const [settingsForm, setSettingsForm] = useState<{
+    family_currency: string;
+    user_currency: string;
+    locale: string;
+    display: DisplaySettings;
+  }>(() => ({
+    family_currency: 'RUB',
+    user_currency: 'RUB',
+    locale: 'ru-RU',
+    display: cloneDisplaySettings()
+  }));
   const [categories, setCategories] = useState<Category[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [familyMembers, setFamilyMembers] = useState<FamilyMember[]>([]);
@@ -165,6 +200,20 @@ export default function Home() {
     () => activeCategories.filter((category) => category.type === plannedForm.type),
     [activeCategories, plannedForm.type]
   );
+  const filterableCategories = useMemo(
+    () => (showArchivedCategories ? categories : activeCategories),
+    [showArchivedCategories, categories, activeCategories]
+  );
+  const currencyOptions = useMemo(() => {
+    const set = new Set<string>(settingsSummary?.supported_currencies ?? ['RUB', 'USD', 'EUR']);
+    if (settingsSummary?.family.currency_base) {
+      set.add(settingsSummary.family.currency_base);
+    }
+    if (settingsSummary?.user.currency_default) {
+      set.add(settingsSummary.user.currency_default);
+    }
+    return Array.from(set).sort();
+  }, [settingsSummary]);
   const periodLabel = useMemo(() => {
     if (periodStart && periodEnd) {
       return `с ${periodStart} по ${periodEnd}`;
@@ -177,6 +226,16 @@ export default function Home() {
     }
     return 'за всё время';
   }, [periodStart, periodEnd]);
+  const familyCurrencyPreference =
+    settingsSummary?.family.currency_base ?? userData?.family.currency_base ?? '';
+  const showTotalsInFamilyCurrency =
+    settingsSummary?.user.display.show_totals_in_family_currency ??
+    userData?.user.display_settings.show_totals_in_family_currency ??
+    true;
+  const showArchivedCategories =
+    settingsSummary?.user.display.show_archived ??
+    userData?.user.display_settings.show_archived ??
+    false;
   const accountTotals = useMemo(() => {
     if (!reportsOverview) {
       return [] as { currency: string; amount_minor: number }[];
@@ -185,8 +244,15 @@ export default function Home() {
     for (const account of reportsOverview.account_balances) {
       totals.set(account.currency, (totals.get(account.currency) ?? 0) + account.balance_minor);
     }
-    return Array.from(totals.entries()).map(([currency, amount]) => ({ currency, amount_minor: amount }));
-  }, [reportsOverview]);
+    const result = Array.from(totals.entries()).map(([currency, amount]) => ({ currency, amount_minor: amount }));
+    if (!showTotalsInFamilyCurrency) {
+      return result;
+    }
+    if (!familyCurrencyPreference) {
+      return result;
+    }
+    return result.filter((item) => item.currency === familyCurrencyPreference);
+  }, [reportsOverview, familyCurrencyPreference, showTotalsInFamilyCurrency]);
   const hasAccounts = accounts.length > 0;
   const canPlanOperations = hasAccounts && plannedAvailableCategories.length > 0;
 
@@ -240,11 +306,27 @@ export default function Home() {
       setReportsOverview(null);
       setReportsError(null);
       setIsReportsLoading(false);
+      setSettingsSummary(null);
+      setSettingsError(null);
+      setSettingsSuccess(null);
+      setSettingsForm({
+        family_currency: 'RUB',
+        user_currency: 'RUB',
+        locale: 'ru-RU',
+        display: cloneDisplaySettings()
+      });
       return;
     }
     void refreshMembers(userData.user.id);
     void refreshPlannedOperationsList(userData.user.id);
   }, [refreshMembers, refreshPlannedOperationsList, userData?.user.id]);
+
+  useEffect(() => {
+    if (!userData) {
+      return;
+    }
+    void loadSettingsSummary(userData.user.id);
+  }, [userData?.user.id]);
 
   function sortAccounts(list: Account[]) {
     return [...list].sort((left, right) => left.name.localeCompare(right.name, 'ru'));
@@ -315,6 +397,16 @@ export default function Home() {
       .join(' · ');
   }
 
+  function applyTotalsPreference(totals: { currency: string; amount_minor: number }[]) {
+    if (!showTotalsInFamilyCurrency) {
+      return totals;
+    }
+    if (!familyCurrencyPreference) {
+      return totals;
+    }
+    return totals.filter((item) => item.currency === familyCurrencyPreference);
+  }
+
   function resolvePeriodRange(): {
     startIso?: string;
     endIso?: string;
@@ -373,6 +465,62 @@ export default function Home() {
     },
     []
   );
+
+  async function loadSettingsSummary(userId: string) {
+    setIsSettingsLoading(true);
+    setSettingsError(null);
+    setSettingsSuccess(null);
+    try {
+      const summary = await fetchUserSettings(userId);
+      setSettingsSummary(summary);
+      setSettingsForm({
+        family_currency: summary.family.currency_base,
+        user_currency: summary.user.currency_default,
+        locale: summary.user.locale,
+        display: cloneDisplaySettings(summary.user.display)
+      });
+      setCategories(sortCategories(summary.categories));
+      const sortedAccounts = sortAccounts(summary.accounts);
+      setAccounts(sortedAccounts);
+      setSelectedAccountId((current) => {
+        if (current && sortedAccounts.some((account) => account.id === current)) {
+          return current;
+        }
+        return sortedAccounts[0]?.id ?? '';
+      });
+      setFilterAccountId((current) => {
+        if (current && sortedAccounts.some((account) => account.id === current)) {
+          return current;
+        }
+        return '';
+      });
+      setAccountForm((prev) => ({
+        ...prev,
+        currency: summary.user.currency_default
+      }));
+      setUserData((prev) =>
+        prev
+          ? {
+              ...prev,
+              user: {
+                ...prev.user,
+                locale: summary.user.locale,
+                currency_default: summary.user.currency_default,
+                display_settings: summary.user.display
+              },
+              family: {
+                ...prev.family,
+                currency_base: summary.family.currency_base
+              }
+            }
+          : prev
+      );
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : 'Не удалось загрузить настройки');
+    } finally {
+      setIsSettingsLoading(false);
+    }
+  }
 
   async function refreshAccounts(userId: string, preferredAccountId?: string) {
     const list = sortAccounts(await fetchAccounts(userId));
@@ -519,6 +667,12 @@ export default function Home() {
         family_id: String(formData.get('family_id') ?? '')
       });
       setUserData(response);
+      setSettingsForm({
+        family_currency: response.family.currency_base,
+        user_currency: response.user.currency_default,
+        locale: response.user.locale,
+        display: cloneDisplaySettings(response.user.display_settings)
+      });
       setFamilyMembers(response.members);
       setMembersError(null);
       setCategories(sortCategories(response.categories));
@@ -536,6 +690,80 @@ export default function Home() {
       setRegisterError(error instanceof Error ? error.message : 'Не удалось зарегистрироваться');
     } finally {
       setIsRegistering(false);
+    }
+  }
+
+  async function handleSettingsSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!userData) {
+      return;
+    }
+    setSettingsError(null);
+    setSettingsSuccess(null);
+    setIsSettingsSaving(true);
+    try {
+      const trimmedUserCurrency = settingsForm.user_currency.trim().toUpperCase();
+      const trimmedLocale = settingsForm.locale.trim();
+      const payload: UpdateUserSettingsPayload = {
+        user_currency: trimmedUserCurrency || userData.user.currency_default,
+        locale: trimmedLocale || userData.user.locale,
+        display: cloneDisplaySettings(settingsForm.display)
+      };
+      if (userData.user.role === 'owner') {
+        const trimmedFamilyCurrency = settingsForm.family_currency.trim().toUpperCase();
+        if (trimmedFamilyCurrency) {
+          payload.family_currency = trimmedFamilyCurrency;
+        }
+      }
+      const updated = await updateUserSettings(userData.user.id, payload);
+      setSettingsSummary(updated);
+      setSettingsForm({
+        family_currency: updated.family.currency_base,
+        user_currency: updated.user.currency_default,
+        locale: updated.user.locale,
+        display: cloneDisplaySettings(updated.user.display)
+      });
+      setCategories(sortCategories(updated.categories));
+      const sortedAccounts = sortAccounts(updated.accounts);
+      setAccounts(sortedAccounts);
+      setSelectedAccountId((current) => {
+        if (current && sortedAccounts.some((account) => account.id === current)) {
+          return current;
+        }
+        return sortedAccounts[0]?.id ?? '';
+      });
+      setFilterAccountId((current) => {
+        if (current && sortedAccounts.some((account) => account.id === current)) {
+          return current;
+        }
+        return '';
+      });
+      setAccountForm((prev) => ({
+        ...prev,
+        currency: updated.user.currency_default
+      }));
+      setUserData((prev) =>
+        prev
+          ? {
+              ...prev,
+              user: {
+                ...prev.user,
+                locale: updated.user.locale,
+                currency_default: updated.user.currency_default,
+                display_settings: updated.user.display
+              },
+              family: {
+                ...prev.family,
+                currency_base: updated.family.currency_base
+              }
+            }
+          : prev
+      );
+      setSettingsSuccess('Настройки обновлены');
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : 'Не удалось сохранить настройки');
+    } finally {
+      setIsSettingsSaving(false);
     }
   }
 
@@ -920,6 +1148,169 @@ export default function Home() {
       </section>
 
       <section className="panel">
+        <h2>Настройки справочников и отображения</h2>
+        {isSettingsLoading && <p className="highlight">Загрузка настроек...</p>}
+        {settingsError && <p className="error">{settingsError}</p>}
+        {settingsSuccess && <p className="highlight">{settingsSuccess}</p>}
+        <form
+          onSubmit={handleSettingsSubmit}
+          className="form-grid"
+          style={{ gap: '1rem', alignItems: 'flex-start' }}
+        >
+          {userData?.user.role === 'owner' && (
+            <div className="input-group">
+              <label htmlFor="family_currency">Базовая валюта семьи</label>
+              <select
+                id="family_currency"
+                name="family_currency"
+                className="select"
+                value={settingsForm.family_currency}
+                onChange={(event) =>
+                  setSettingsForm((prev) => ({
+                    ...prev,
+                    family_currency: event.target.value.toUpperCase()
+                  }))
+                }
+                disabled={isSettingsSaving || isSettingsLoading}
+              >
+                {currencyOptions.map((currency) => (
+                  <option key={currency} value={currency}>
+                    {currency}
+                  </option>
+                ))}
+              </select>
+              <p className="meta">Определяет валюту для общих лимитов и отчётности семьи.</p>
+            </div>
+          )}
+          <div className="input-group">
+            <label htmlFor="user_currency">Валюта по умолчанию</label>
+            <select
+              id="user_currency"
+              name="user_currency"
+              className="select"
+              value={settingsForm.user_currency}
+              onChange={(event) =>
+                setSettingsForm((prev) => ({
+                  ...prev,
+                  user_currency: event.target.value.toUpperCase()
+                }))
+              }
+              disabled={isSettingsSaving || isSettingsLoading}
+            >
+              {currencyOptions.map((currency) => (
+                <option key={`user-${currency}`} value={currency}>
+                  {currency}
+                </option>
+              ))}
+            </select>
+            <p className="meta">Новые счета и операции будут использовать эту валюту по умолчанию.</p>
+          </div>
+          <div className="input-group">
+            <label htmlFor="locale">Локаль</label>
+            <input
+              id="locale"
+              name="locale"
+              className="input"
+              value={settingsForm.locale}
+              onChange={(event) =>
+                setSettingsForm((prev) => ({
+                  ...prev,
+                  locale: event.target.value
+                }))
+              }
+              placeholder="ru-RU"
+              disabled={isSettingsSaving || isSettingsLoading}
+            />
+            <p className="meta">Определяет формат дат и чисел в интерфейсе.</p>
+          </div>
+          <div className="input-group">
+            <label htmlFor="theme">Тема интерфейса</label>
+            <select
+              id="theme"
+              name="theme"
+              className="select"
+              value={settingsForm.display.theme}
+              onChange={(event) =>
+                setSettingsForm((prev) => ({
+                  ...prev,
+                  display: { ...prev.display, theme: event.target.value as DisplaySettings['theme'] }
+                }))
+              }
+              disabled={isSettingsSaving || isSettingsLoading}
+            >
+              <option value="system">Следовать системе</option>
+              <option value="light">Светлая</option>
+              <option value="dark">Тёмная</option>
+            </select>
+          </div>
+          <div className="input-group">
+            <label htmlFor="density">Плотность карточек</label>
+            <select
+              id="density"
+              name="density"
+              className="select"
+              value={settingsForm.display.density}
+              onChange={(event) =>
+                setSettingsForm((prev) => ({
+                  ...prev,
+                  display: { ...prev.display, density: event.target.value as DisplaySettings['density'] }
+                }))
+              }
+              disabled={isSettingsSaving || isSettingsLoading}
+            >
+              <option value="comfortable">Комфортная</option>
+              <option value="compact">Компактная</option>
+            </select>
+          </div>
+          <div
+            className="input-group"
+            style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}
+          >
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <input
+                type="checkbox"
+                checked={settingsForm.display.show_archived}
+                onChange={(event) =>
+                  setSettingsForm((prev) => ({
+                    ...prev,
+                    display: { ...prev.display, show_archived: event.target.checked }
+                  }))
+                }
+                disabled={isSettingsSaving || isSettingsLoading}
+              />
+              Показывать архивные категории и счета
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <input
+                type="checkbox"
+                checked={settingsForm.display.show_totals_in_family_currency}
+                onChange={(event) =>
+                  setSettingsForm((prev) => ({
+                    ...prev,
+                    display: {
+                      ...prev.display,
+                      show_totals_in_family_currency: event.target.checked
+                    }
+                  }))
+                }
+                disabled={isSettingsSaving || isSettingsLoading}
+              />
+              Сводные суммы только в валюте семьи
+            </label>
+          </div>
+          <div className="input-group" style={{ alignSelf: 'flex-end' }}>
+            <button
+              type="submit"
+              className="button"
+              disabled={isSettingsSaving || isSettingsLoading}
+            >
+              {isSettingsSaving ? 'Сохранение...' : 'Сохранить настройки'}
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section className="panel">
         <h2>Счета и кошельки</h2>
         <div
           className="form-grid"
@@ -1046,7 +1437,7 @@ export default function Home() {
             <div>
               <h3 style={{ marginBottom: '0.5rem' }}>Расходы по категориям</h3>
               {reportsOverview.expenses.totals.length > 0 && (
-                <p className="meta">Итого: {formatTotals(reportsOverview.expenses.totals)}</p>
+                <p className="meta">Итого: {formatTotals(applyTotalsPreference(reportsOverview.expenses.totals))}</p>
               )}
               {reportsOverview.expenses.by_category.length === 0 ? (
                 <p className="highlight">В выбранном периоде не было расходных операций.</p>
@@ -1103,7 +1494,7 @@ export default function Home() {
             <div>
               <h3 style={{ marginBottom: '0.5rem' }}>Доходы</h3>
               {reportsOverview.incomes.totals.length > 0 && (
-                <p className="meta">Итого: {formatTotals(reportsOverview.incomes.totals)}</p>
+                <p className="meta">Итого: {formatTotals(applyTotalsPreference(reportsOverview.incomes.totals))}</p>
               )}
               {reportsOverview.incomes.by_category.length === 0 ? (
                 <p className="highlight">В выбранном периоде не было доходов.</p>
@@ -1672,7 +2063,7 @@ export default function Home() {
                 onChange={(event) => setFilterCategoryId(event.target.value)}
               >
                 <option value="">Все категории</option>
-                {categories.map((category) => (
+                {filterableCategories.map((category) => (
                   <option key={category.id} value={category.id}>
                     {category.name}
                     {category.is_archived ? ' · архив' : ''}
@@ -1790,7 +2181,7 @@ export default function Home() {
             </ul>
           </div>
         )}
-        {archivedCategories.length > 0 && (
+        {showArchivedCategories && archivedCategories.length > 0 && (
           <div>
             <h3 style={{ fontSize: '1rem', marginBottom: '0.5rem' }}>Архив</h3>
             <ul className="transactions">

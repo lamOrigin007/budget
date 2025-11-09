@@ -36,6 +36,8 @@ func RegisterRoutes(e *echo.Echo, handlers *Handlers) {
 	api := e.Group("/api/v1")
 	api.POST("/users", handlers.RegisterUser)
 	api.GET("/users/:id", handlers.GetUser)
+	api.GET("/users/:id/settings", handlers.GetUserSettings)
+	api.PUT("/users/:id/settings", handlers.UpdateUserSettings)
 	api.GET("/users/:id/categories", handlers.ListCategories)
 	api.POST("/users/:id/categories", handlers.CreateCategory)
 	api.PUT("/users/:id/categories/:categoryId", handlers.UpdateCategory)

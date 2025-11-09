@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -42,6 +43,7 @@ import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
 import io.ktor.client.request.post
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.CoroutineScope
@@ -76,7 +78,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun BudgetScreen(client: HttpClient) {
     var email by remember { mutableStateOf("") }
@@ -131,6 +133,18 @@ fun BudgetScreen(client: HttpClient) {
     var reports by remember { mutableStateOf<ReportsOverview?>(null) }
     var reportsMessage by remember { mutableStateOf("") }
     var isReportsLoading by remember { mutableStateOf(false) }
+    var settingsSummary by remember { mutableStateOf<UserSettingsSummary?>(null) }
+    var isSettingsLoading by remember { mutableStateOf(false) }
+    var isSettingsSaving by remember { mutableStateOf(false) }
+    var settingsMessage by remember { mutableStateOf("") }
+    var supportedCurrencies by remember { mutableStateOf(listOf("RUB", "USD", "EUR")) }
+    var familyCurrencySetting by remember { mutableStateOf("RUB") }
+    var userCurrencySetting by remember { mutableStateOf("RUB") }
+    var localeSetting by remember { mutableStateOf("ru-RU") }
+    var themeSetting by remember { mutableStateOf("system") }
+    var densitySetting by remember { mutableStateOf("comfortable") }
+    var showArchivedSetting by remember { mutableStateOf(false) }
+    var showTotalsInFamilyCurrency by remember { mutableStateOf(true) }
 
     fun register() {
         CoroutineScope(Dispatchers.IO).launch {
@@ -152,14 +166,23 @@ fun BudgetScreen(client: HttpClient) {
                     user = response.user
                     family = response.family
                     status = "Профиль создан для ${'$'}{response.user.name}"
-                    accounts = response.accounts
+                    accounts = response.accounts.sortedBy { it.name }
                     plannedAccountId = response.accounts.firstOrNull()?.id
                     accountCurrency = response.user.currencyDefault
+                    categories = response.categories.sortedWith(compareBy({ it.isArchived }, { it.name }))
                     familyMembers = response.members
                     membersMessage = ""
                     familyId = ""
                     transactionMemberFilter = null
                     accountShared = true
+                    familyCurrencySetting = response.family.currencyBase
+                    userCurrencySetting = response.user.currencyDefault
+                    localeSetting = response.user.locale
+                    themeSetting = response.user.displaySettings.theme
+                    densitySetting = response.user.displaySettings.density
+                    showArchivedSetting = response.user.displaySettings.showArchived
+                    showTotalsInFamilyCurrency = response.user.displaySettings.showTotalsInFamilyCurrency
+                    settingsMessage = ""
                 }
                 loadCategories(response.user.id)
                 loadAccounts(response.user.id)
@@ -167,6 +190,7 @@ fun BudgetScreen(client: HttpClient) {
                 loadTransactions(response.user.id, null)
                 loadPlannedOperations(response.user.id)
                 loadReports(response.user.id)
+                loadSettings(response.user.id)
             } catch (ex: Exception) {
                 withContext(Dispatchers.Main) {
                     status = "Ошибка: ${'$'}{ex.message}"
@@ -323,6 +347,105 @@ fun BudgetScreen(client: HttpClient) {
                     reports = null
                     reportsMessage = "Не удалось загрузить отчёты: ${'$'}{ex.message}"
                     isReportsLoading = false
+                }
+            }
+        }
+    }
+
+    fun loadSettings(userId: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            withContext(Dispatchers.Main) {
+                isSettingsLoading = true
+                settingsMessage = ""
+            }
+            try {
+                val response: UserSettingsSummary = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/settings").body()
+                withContext(Dispatchers.Main) {
+                    settingsSummary = response
+                    supportedCurrencies = response.supportedCurrencies.sorted()
+                    familyCurrencySetting = response.family.currencyBase
+                    userCurrencySetting = response.user.currencyDefault
+                    localeSetting = response.user.locale
+                    themeSetting = response.user.display.theme
+                    densitySetting = response.user.display.density
+                    showArchivedSetting = response.user.display.showArchived
+                    showTotalsInFamilyCurrency = response.user.display.showTotalsInFamilyCurrency
+                    categories = response.categories.sortedWith(compareBy({ it.isArchived }, { it.name }))
+                    plannedCategoryId = categories.firstOrNull { !it.isArchived && it.type == plannedType }?.id
+                    accounts = response.accounts.sortedBy { it.name }
+                    plannedAccountId = response.accounts.firstOrNull()?.id
+                    accountCurrency = response.user.currencyDefault
+                    user = user?.copy(
+                        locale = response.user.locale,
+                        currencyDefault = response.user.currencyDefault,
+                        displaySettings = response.user.display
+                    ) ?: response.user
+                    family = family?.copy(currencyBase = response.family.currencyBase) ?: response.family
+                }
+            } catch (ex: Exception) {
+                withContext(Dispatchers.Main) {
+                    settingsMessage = "Не удалось загрузить настройки: ${'$'}{ex.message}"
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    isSettingsLoading = false
+                }
+            }
+        }
+    }
+
+    fun saveSettings() {
+        val currentUser = user ?: return
+        CoroutineScope(Dispatchers.IO).launch {
+            withContext(Dispatchers.Main) {
+                isSettingsSaving = true
+                settingsMessage = ""
+            }
+            try {
+                val payload = UpdateUserSettingsPayload(
+                    familyCurrency = if (currentUser.role == "owner") familyCurrencySetting.uppercase(Locale.getDefault()) else null,
+                    userCurrency = userCurrencySetting.uppercase(Locale.getDefault()),
+                    locale = localeSetting,
+                    display = DisplaySettings(
+                        theme = themeSetting,
+                        density = densitySetting,
+                        showArchived = showArchivedSetting,
+                        showTotalsInFamilyCurrency = showTotalsInFamilyCurrency
+                    )
+                )
+                val response: UserSettingsSummary = client.put("http://10.0.2.2:8080/api/v1/users/${'$'}{currentUser.id}/settings") {
+                    setBody(payload)
+                }.body()
+                withContext(Dispatchers.Main) {
+                    settingsSummary = response
+                    supportedCurrencies = response.supportedCurrencies.sorted()
+                    familyCurrencySetting = response.family.currencyBase
+                    userCurrencySetting = response.user.currencyDefault
+                    localeSetting = response.user.locale
+                    themeSetting = response.user.display.theme
+                    densitySetting = response.user.display.density
+                    showArchivedSetting = response.user.display.showArchived
+                    showTotalsInFamilyCurrency = response.user.display.showTotalsInFamilyCurrency
+                    categories = response.categories.sortedWith(compareBy({ it.isArchived }, { it.name }))
+                    plannedCategoryId = categories.firstOrNull { !it.isArchived && it.type == plannedType }?.id
+                    accounts = response.accounts.sortedBy { it.name }
+                    plannedAccountId = response.accounts.firstOrNull()?.id
+                    accountCurrency = response.user.currencyDefault
+                    user = currentUser.copy(
+                        locale = response.user.locale,
+                        currencyDefault = response.user.currencyDefault,
+                        displaySettings = response.user.display
+                    )
+                    family = family?.copy(currencyBase = response.family.currencyBase) ?: response.family
+                    settingsMessage = "Настройки обновлены"
+                }
+            } catch (ex: Exception) {
+                withContext(Dispatchers.Main) {
+                    settingsMessage = "Не удалось сохранить настройки: ${'$'}{ex.message}"
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    isSettingsSaving = false
                 }
             }
         }
@@ -636,6 +759,29 @@ fun BudgetScreen(client: HttpClient) {
             }
             if (user != null) {
                 Spacer(modifier = Modifier.height(16.dp))
+                SettingsSection(
+                    user = user,
+                    supportedCurrencies = supportedCurrencies,
+                    familyCurrency = familyCurrencySetting,
+                    userCurrency = userCurrencySetting,
+                    locale = localeSetting,
+                    theme = themeSetting,
+                    density = densitySetting,
+                    showArchived = showArchivedSetting,
+                    showTotals = showTotalsInFamilyCurrency,
+                    isLoading = isSettingsLoading,
+                    isSaving = isSettingsSaving,
+                    message = settingsMessage,
+                    onFamilyCurrencyChange = { familyCurrencySetting = it.uppercase() },
+                    onUserCurrencyChange = { userCurrencySetting = it.uppercase() },
+                    onLocaleChange = { localeSetting = it },
+                    onThemeChange = { themeSetting = it },
+                    onDensityChange = { densitySetting = it },
+                    onShowArchivedChange = { showArchivedSetting = it },
+                    onShowTotalsChange = { showTotalsInFamilyCurrency = it },
+                    onSave = { saveSettings() }
+                )
+                Spacer(modifier = Modifier.height(16.dp))
                 MembersSection(
                     members = familyMembers,
                     message = membersMessage,
@@ -715,6 +861,8 @@ fun BudgetScreen(client: HttpClient) {
                     reports = reports,
                     message = reportsMessage,
                     isLoading = isReportsLoading,
+                    showTotalsInFamilyCurrency = showTotalsInFamilyCurrency,
+                    familyCurrency = family?.currencyBase ?: familyCurrencySetting,
                     onStartChange = { reportStart = it },
                     onEndChange = { reportEnd = it },
                     onApply = { user?.let { loadReports(it.id) } }
@@ -730,6 +878,7 @@ fun BudgetScreen(client: HttpClient) {
                     editingCategoryId = editingCategoryId,
                     message = categoryMessage,
                     isLoading = isCategoryLoading,
+                    showArchived = showArchivedSetting,
                     onNameChange = { categoryName = it },
                     onTypeChange = { categoryType = it },
                     onColorChange = { categoryColor = it.uppercase() },
@@ -749,6 +898,110 @@ fun BudgetScreen(client: HttpClient) {
                 )
             }
             Spacer(modifier = Modifier.height(12.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SettingsSection(
+    user: User,
+    supportedCurrencies: List<String>,
+    familyCurrency: String,
+    userCurrency: String,
+    locale: String,
+    theme: String,
+    density: String,
+    showArchived: Boolean,
+    showTotals: Boolean,
+    isLoading: Boolean,
+    isSaving: Boolean,
+    message: String,
+    onFamilyCurrencyChange: (String) -> Unit,
+    onUserCurrencyChange: (String) -> Unit,
+    onLocaleChange: (String) -> Unit,
+    onThemeChange: (String) -> Unit,
+    onDensityChange: (String) -> Unit,
+    onShowArchivedChange: (Boolean) -> Unit,
+    onShowTotalsChange: (Boolean) -> Unit,
+    onSave: () -> Unit
+) {
+    val currencyPresets = remember(supportedCurrencies) { supportedCurrencies.distinct().sorted() }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Настройки отображения", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            if (isLoading) {
+                Text("Загрузка текущих параметров...", style = MaterialTheme.typography.bodySmall)
+            }
+            if (message.isNotEmpty()) {
+                val isError = message.startsWith("Не удалось")
+                Text(message, color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary)
+            }
+            if (user.role == "owner") {
+                OutlinedTextField(
+                    value = familyCurrency,
+                    onValueChange = { onFamilyCurrencyChange(it.uppercase()) },
+                    label = { Text("Базовая валюта семьи") },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isSaving && !isLoading
+                )
+                if (currencyPresets.isNotEmpty()) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        currencyPresets.forEach { preset ->
+                            OutlinedButton(onClick = { onFamilyCurrencyChange(preset) }, enabled = !isSaving && !isLoading) {
+                                Text(preset)
+                            }
+                        }
+                    }
+                }
+            }
+            OutlinedTextField(
+                value = userCurrency,
+                onValueChange = { onUserCurrencyChange(it.uppercase()) },
+                label = { Text("Валюта по умолчанию") },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isSaving && !isLoading
+            )
+            OutlinedTextField(
+                value = locale,
+                onValueChange = onLocaleChange,
+                label = { Text("Локаль") },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isSaving && !isLoading
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Тема", style = MaterialTheme.typography.titleSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("system" to "Система", "light" to "Светлая", "dark" to "Тёмная").forEach { (value, label) ->
+                        Button(onClick = { onThemeChange(value) }, enabled = !isSaving && theme != value) { Text(label) }
+                    }
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Плотность", style = MaterialTheme.typography.titleSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("comfortable" to "Комфортная", "compact" to "Компактная").forEach { (value, label) ->
+                        Button(onClick = { onDensityChange(value) }, enabled = !isSaving && density != value) { Text(label) }
+                    }
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Checkbox(checked = showArchived, onCheckedChange = { onShowArchivedChange(it) }, enabled = !isSaving && !isLoading)
+                    Text("Показывать архивные категории", style = MaterialTheme.typography.bodySmall)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Checkbox(
+                        checked = showTotals,
+                        onCheckedChange = { onShowTotalsChange(it) },
+                        enabled = !isSaving && !isLoading
+                    )
+                    Text("Сводные суммы только в валюте семьи", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            Button(onClick = onSave, enabled = !isSaving && !isLoading) {
+                Text(if (isSaving) "Сохранение..." else "Сохранить")
+            }
         }
     }
 }
@@ -869,16 +1122,32 @@ private fun ReportsSection(
     reports: ReportsOverview?,
     message: String,
     isLoading: Boolean,
+    showTotalsInFamilyCurrency: Boolean,
+    familyCurrency: String?,
     onStartChange: (String) -> Unit,
     onEndChange: (String) -> Unit,
     onApply: () -> Unit
 ) {
-    val accountTotals = remember(reports) {
-        reports?.accountBalances
+    val accountTotals = remember(reports, showTotalsInFamilyCurrency, familyCurrency) {
+        val totals = reports?.accountBalances
             ?.groupBy { it.currency }
             ?.map { (currency, balances) ->
                 CurrencyAmount(currency = currency, amountMinor = balances.sumOf { it.balanceMinor })
             } ?: emptyList()
+        if (showTotalsInFamilyCurrency && !familyCurrency.isNullOrBlank()) {
+            totals.filter { it.currency.equals(familyCurrency, ignoreCase = true) }
+        } else {
+            totals
+        }
+    }
+    val totalsFilter: (List<CurrencyAmount>) -> List<CurrencyAmount> = remember(showTotalsInFamilyCurrency, familyCurrency) {
+        { totals ->
+            if (showTotalsInFamilyCurrency && !familyCurrency.isNullOrBlank()) {
+                totals.filter { it.currency.equals(familyCurrency, ignoreCase = true) }
+            } else {
+                totals
+            }
+        }
     }
 
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -931,7 +1200,7 @@ private fun ReportsSection(
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("Расходы по категориям", fontWeight = FontWeight.SemiBold)
-                            formatTotalsList(reports.expenses.totals)?.let {
+                            formatTotalsList(totalsFilter(reports.expenses.totals))?.let {
                                 Text("Итого: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
                             }
                             if (reports.expenses.byCategory.isEmpty()) {
@@ -953,7 +1222,7 @@ private fun ReportsSection(
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("Доходы", fontWeight = FontWeight.SemiBold)
-                            formatTotalsList(reports.incomes.totals)?.let {
+                            formatTotalsList(totalsFilter(reports.incomes.totals))?.let {
                                 Text("Итого: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
                             }
                             if (reports.incomes.byCategory.isEmpty()) {
@@ -1227,6 +1496,7 @@ private fun PlannedOperationsSection(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CategoryManager(
     categories: List<Category>,
@@ -1238,6 +1508,7 @@ private fun CategoryManager(
     editingCategoryId: String?,
     message: String,
     isLoading: Boolean,
+    showArchived: Boolean,
     onNameChange: (String) -> Unit,
     onTypeChange: (String) -> Unit,
     onColorChange: (String) -> Unit,
@@ -1249,7 +1520,7 @@ private fun CategoryManager(
     onArchive: (Category, Boolean) -> Unit
 ) {
     val active = categories.filter { !it.isArchived }
-    val archived = categories.filter { it.isArchived }
+    val archived = if (showArchived) categories.filter { it.isArchived } else emptyList()
     val parentLabel = active.firstOrNull { it.id == categoryParentId }?.name ?: "Без родителя"
     var parentMenuExpanded by remember { mutableStateOf(false) }
 
@@ -1388,6 +1659,7 @@ private fun CategoryRow(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AccountsManager(
     accounts: List<Account>,
@@ -1564,26 +1836,38 @@ private data class RegisterRequest(
     val name: String,
     val locale: String,
     val currency: String,
-    @SerialName("family_name") val familyName: String?
+    @SerialName("family_name") val familyName: String?,
+    @SerialName("family_id") val familyId: String? = null
 )
 
 @Serializable
 private data class RegisterResponse(
     val user: User,
     val family: Family,
-    val accounts: List<Account>
+    val categories: List<Category>,
+    val accounts: List<Account>,
+    val members: List<FamilyMember>
 )
 
 @Serializable
 private data class User(
     val id: String,
-    val name: String
+    @SerialName("family_id") val familyId: String,
+    val email: String,
+    val name: String,
+    val role: String,
+    val locale: String,
+    @SerialName("currency_default") val currencyDefault: String,
+    @SerialName("display_settings") val displaySettings: DisplaySettings,
+    @SerialName("created_at") val createdAt: String? = null,
+    @SerialName("updated_at") val updatedAt: String? = null
 )
 
 @Serializable
 private data class Family(
     val id: String,
-    val name: String
+    val name: String,
+    @SerialName("currency_base") val currencyBase: String
 )
 
 @Serializable
@@ -1791,4 +2075,44 @@ private data class AccountBalanceReport(
     @SerialName("balance_minor") val balanceMinor: Long,
     @SerialName("is_shared") val isShared: Boolean,
     @SerialName("is_archived") val isArchived: Boolean
+)
+
+@Serializable
+private data class DisplaySettings(
+    val theme: String,
+    val density: String,
+    @SerialName("show_archived") val showArchived: Boolean,
+    @SerialName("show_totals_in_family_currency") val showTotalsInFamilyCurrency: Boolean
+)
+
+@Serializable
+private data class UserSettingsSummary(
+    @SerialName("supported_currencies") val supportedCurrencies: List<String>,
+    val family: FamilySettings,
+    val user: UserSettings,
+    val categories: List<Category>,
+    val accounts: List<Account>
+)
+
+@Serializable
+private data class FamilySettings(
+    val id: String,
+    val name: String,
+    @SerialName("currency_base") val currencyBase: String
+)
+
+@Serializable
+private data class UserSettings(
+    val id: String,
+    val locale: String,
+    @SerialName("currency_default") val currencyDefault: String,
+    val display: DisplaySettings
+)
+
+@Serializable
+private data class UpdateUserSettingsPayload(
+    @SerialName("family_currency") val familyCurrency: String? = null,
+    @SerialName("user_currency") val userCurrency: String,
+    val locale: String,
+    val display: DisplaySettings
 )
