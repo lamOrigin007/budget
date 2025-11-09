@@ -126,6 +126,11 @@ fun BudgetScreen(client: HttpClient) {
     var plannedDue by remember { mutableStateOf(java.time.LocalDate.now().toString()) }
     var plannedComment by remember { mutableStateOf("") }
     var plannedRecurrence by remember { mutableStateOf("") }
+    var reportStart by remember { mutableStateOf(LocalDate.now().withDayOfMonth(1).toString()) }
+    var reportEnd by remember { mutableStateOf(LocalDate.now().toString()) }
+    var reports by remember { mutableStateOf<ReportsOverview?>(null) }
+    var reportsMessage by remember { mutableStateOf("") }
+    var isReportsLoading by remember { mutableStateOf(false) }
 
     fun register() {
         CoroutineScope(Dispatchers.IO).launch {
@@ -161,6 +166,7 @@ fun BudgetScreen(client: HttpClient) {
                 loadMembers(response.user.id)
                 loadTransactions(response.user.id, null)
                 loadPlannedOperations(response.user.id)
+                loadReports(response.user.id)
             } catch (ex: Exception) {
                 withContext(Dispatchers.Main) {
                     status = "Ошибка: ${'$'}{ex.message}"
@@ -249,6 +255,74 @@ fun BudgetScreen(client: HttpClient) {
                 withContext(Dispatchers.Main) {
                     transactionsMessage = "Не удалось загрузить операции: ${'$'}{ex.message}"
                     isTransactionsLoading = false
+                }
+            }
+        }
+    }
+
+    fun resolveReportPeriod(): Triple<String?, String?, String?> {
+        var startIso: String? = null
+        var endIso: String? = null
+        if (reportStart.isNotBlank()) {
+            startIso = try {
+                LocalDate.parse(reportStart).atStartOfDay().atOffset(ZoneOffset.UTC).toString()
+            } catch (ex: Exception) {
+                return Triple(null, null, "Некорректная дата начала")
+            }
+        }
+        if (reportEnd.isNotBlank()) {
+            endIso = try {
+                LocalDate.parse(reportEnd).atTime(23, 59, 59).atOffset(ZoneOffset.UTC).toString()
+            } catch (ex: Exception) {
+                return Triple(null, null, "Некорректная дата окончания")
+            }
+        }
+        if (startIso != null && endIso != null) {
+            return try {
+                val startInstant = Instant.parse(startIso)
+                val endInstant = Instant.parse(endIso)
+                if (startInstant.isAfter(endInstant)) {
+                    Triple(startIso, endIso, "Дата начала должна быть не позже даты окончания")
+                } else {
+                    Triple(startIso, endIso, null)
+                }
+            } catch (ex: Exception) {
+                Triple(startIso, endIso, "Некорректные даты периода")
+            }
+        }
+        return Triple(startIso, endIso, null)
+    }
+
+    fun loadReports(userId: String) {
+        val (startIso, endIso, errorMessage) = resolveReportPeriod()
+        if (errorMessage != null) {
+            reportsMessage = errorMessage
+            reports = null
+            return
+        }
+        CoroutineScope(Dispatchers.IO).launch {
+            withContext(Dispatchers.Main) {
+                isReportsLoading = true
+                reportsMessage = ""
+            }
+            try {
+                val response: ReportsOverviewResponse = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/reports/overview") {
+                    if (!startIso.isNullOrBlank()) {
+                        url.parameters.append("start_date", startIso)
+                    }
+                    if (!endIso.isNullOrBlank()) {
+                        url.parameters.append("end_date", endIso)
+                    }
+                }.body()
+                withContext(Dispatchers.Main) {
+                    reports = response.reports
+                    isReportsLoading = false
+                }
+            } catch (ex: Exception) {
+                withContext(Dispatchers.Main) {
+                    reports = null
+                    reportsMessage = "Не удалось загрузить отчёты: ${'$'}{ex.message}"
+                    isReportsLoading = false
                 }
             }
         }
@@ -361,6 +435,7 @@ fun BudgetScreen(client: HttpClient) {
                 }
                 loadTransactions(currentUser.id, transactionMemberFilter)
                 loadAccounts(currentUser.id)
+                loadReports(currentUser.id)
             } catch (ex: Exception) {
                 withContext(Dispatchers.Main) {
                     completingPlanId = null
@@ -456,6 +531,7 @@ fun BudgetScreen(client: HttpClient) {
                     accountMessage = "Счёт создан"
                 }
                 loadAccounts(currentUser.id)
+                loadReports(currentUser.id)
             } catch (ex: Exception) {
                 withContext(Dispatchers.Main) {
                     accountMessage = "Ошибка: ${'$'}{ex.message}"
@@ -633,6 +709,17 @@ fun BudgetScreen(client: HttpClient) {
                     }
                 )
                 Spacer(modifier = Modifier.height(16.dp))
+                ReportsSection(
+                    reportStart = reportStart,
+                    reportEnd = reportEnd,
+                    reports = reports,
+                    message = reportsMessage,
+                    isLoading = isReportsLoading,
+                    onStartChange = { reportStart = it },
+                    onEndChange = { reportEnd = it },
+                    onApply = { user?.let { loadReports(it.id) } }
+                )
+                Spacer(modifier = Modifier.height(16.dp))
                 CategoryManager(
                     categories = categories,
                     categoryName = categoryName,
@@ -766,6 +853,155 @@ private fun TransactionsSection(
                             )
                             transaction.comment?.takeIf { it.isNotBlank() }?.let {
                                 Text(it, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReportsSection(
+    reportStart: String,
+    reportEnd: String,
+    reports: ReportsOverview?,
+    message: String,
+    isLoading: Boolean,
+    onStartChange: (String) -> Unit,
+    onEndChange: (String) -> Unit,
+    onApply: () -> Unit
+) {
+    val accountTotals = remember(reports) {
+        reports?.accountBalances
+            ?.groupBy { it.currency }
+            ?.map { (currency, balances) ->
+                CurrencyAmount(currency = currency, amountMinor = balances.sumOf { it.balanceMinor })
+            } ?: emptyList()
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(
+                text = "Отчёты по операциям",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = reportStart,
+                    onValueChange = onStartChange,
+                    label = { Text("Начало периода") },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("2024-01-01") }
+                )
+                OutlinedTextField(
+                    value = reportEnd,
+                    onValueChange = onEndChange,
+                    label = { Text("Конец периода") },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("2024-01-31") }
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Button(onClick = onApply, enabled = !isLoading) {
+                    Text("Показать отчёты")
+                }
+                if (isLoading) {
+                    Text("Загрузка...", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            if (message.isNotEmpty()) {
+                val isError = message.startsWith("Не удалось") || message.startsWith("Некоррект") || message.startsWith("Дата")
+                Text(
+                    text = message,
+                    color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            if (!isLoading && message.isEmpty()) {
+                if (reports == null) {
+                    Text(
+                        "Добавьте операции и запросите отчёт за нужный период, чтобы увидеть аналитику.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Расходы по категориям", fontWeight = FontWeight.SemiBold)
+                            formatTotalsList(reports.expenses.totals)?.let {
+                                Text("Итого: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                            }
+                            if (reports.expenses.byCategory.isEmpty()) {
+                                Text("Нет расходных операций в выбранном периоде.", style = MaterialTheme.typography.bodySmall)
+                            } else {
+                                reports.expenses.byCategory.forEach { item ->
+                                    Card(modifier = Modifier.fillMaxWidth()) {
+                                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            Text(item.categoryName, fontWeight = FontWeight.SemiBold)
+                                            Text(
+                                                text = formatMoney(item.amountMinor, item.currency),
+                                                color = MaterialTheme.colorScheme.error,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Доходы", fontWeight = FontWeight.SemiBold)
+                            formatTotalsList(reports.incomes.totals)?.let {
+                                Text("Итого: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                            }
+                            if (reports.incomes.byCategory.isEmpty()) {
+                                Text("Нет доходов в выбранном периоде.", style = MaterialTheme.typography.bodySmall)
+                            } else {
+                                reports.incomes.byCategory.forEach { item ->
+                                    Card(modifier = Modifier.fillMaxWidth()) {
+                                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            Text(item.categoryName, fontWeight = FontWeight.SemiBold)
+                                            Text(
+                                                text = formatMoney(item.amountMinor, item.currency),
+                                                color = MaterialTheme.colorScheme.tertiary,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Баланс по счетам", fontWeight = FontWeight.SemiBold)
+                            formatTotalsList(accountTotals)?.let {
+                                Text("Суммарно: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                            }
+                            if (reports.accountBalances.isEmpty()) {
+                                Text("Добавьте счёт, чтобы видеть остатки семьи.", style = MaterialTheme.typography.bodySmall)
+                            } else {
+                                reports.accountBalances.forEach { account ->
+                                    Card(modifier = Modifier.fillMaxWidth()) {
+                                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            Text(account.accountName, fontWeight = FontWeight.SemiBold)
+                                            Text("Тип: ${accountTypeLabel(account.accountType)}", style = MaterialTheme.typography.bodySmall)
+                                            Text(
+                                                text = if (account.isShared) "Общий счёт семьи" else "Личный счёт",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.secondary
+                                            )
+                                            if (account.isArchived) {
+                                                Text("Счёт в архиве", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                                            }
+                                            Text(
+                                                text = "Баланс: ${formatMoney(account.balanceMinor, account.currency)}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1270,6 +1506,24 @@ private fun AccountRow(account: Account) {
     }
 }
 
+private fun accountTypeLabel(type: String): String = when (type) {
+    "card" -> "Карта"
+    "bank" -> "Банковский счёт"
+    "deposit" -> "Вклад"
+    "wallet" -> "Электронный кошелёк"
+    else -> "Наличные"
+}
+
+private fun formatMoney(valueMinor: Long, currency: String): String {
+    val amount = valueMinor / 100.0
+    return String.format(Locale("ru"), "%.2f %s", amount, currency)
+}
+
+private fun formatTotalsList(totals: List<CurrencyAmount>): String? {
+    if (totals.isEmpty()) return null
+    return totals.joinToString(" · ") { formatMoney(it.amountMinor, it.currency) }
+}
+
 private fun roleTitle(role: String): String = when (role) {
     "owner" -> "Владелец"
     "adult" -> "Участник"
@@ -1488,4 +1742,53 @@ private data class PlannedOperationPayload(
 private data class PlannedOperationCompleteResponse(
     @SerialName("planned_operation") val plannedOperation: PlannedOperation,
     val transaction: Transaction
+)
+
+@Serializable
+private data class ReportsOverviewResponse(val reports: ReportsOverview)
+
+@Serializable
+private data class ReportsOverview(
+    val period: ReportPeriod,
+    val expenses: MovementReport,
+    val incomes: MovementReport,
+    @SerialName("account_balances") val accountBalances: List<AccountBalanceReport>
+)
+
+@Serializable
+private data class ReportPeriod(
+    @SerialName("start_date") val startDate: String? = null,
+    @SerialName("end_date") val endDate: String? = null
+)
+
+@Serializable
+private data class MovementReport(
+    val totals: List<CurrencyAmount>,
+    @SerialName("by_category") val byCategory: List<CategoryReportItem>
+)
+
+@Serializable
+private data class CurrencyAmount(
+    val currency: String,
+    @SerialName("amount_minor") val amountMinor: Long
+)
+
+@Serializable
+private data class CategoryReportItem(
+    @SerialName("category_id") val categoryId: String,
+    @SerialName("category_name") val categoryName: String,
+    @SerialName("category_color") val categoryColor: String,
+    val currency: String,
+    @SerialName("amount_minor") val amountMinor: Long
+)
+
+@Serializable
+private data class AccountBalanceReport(
+    @SerialName("account_id") val accountId: String,
+    @SerialName("account_name") val accountName: String,
+    @SerialName("account_type") val accountType: String,
+    val currency: String,
+    @SerialName("balance_minor") val balanceMinor: Long,
+    @SerialName("is_shared") val isShared: Boolean,
+    @SerialName("is_archived") val isArchived: Boolean
 )

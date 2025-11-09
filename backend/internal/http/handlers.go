@@ -645,6 +645,36 @@ func (h *Handlers) ListTransactions(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{"transactions": txns})
 }
 
+func (h *Handlers) GetReportsOverview(c echo.Context) error {
+	userID := c.Param("id")
+	user, err := h.store.GetUser(c.Request().Context(), userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+	}
+
+	startDate, err := parseOptionalTime(c.QueryParam("start_date"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "start_date must be RFC3339"})
+	}
+	endDate, err := parseOptionalTime(c.QueryParam("end_date"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "end_date must be RFC3339"})
+	}
+	if startDate != nil && endDate != nil && startDate.After(*endDate) {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "start_date must be before end_date"})
+	}
+
+	reports, err := h.store.GetReportsOverview(c.Request().Context(), user.FamilyID, startDate, endDate)
+	if err != nil {
+		return err
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{"reports": reports})
+}
+
 func (h *Handlers) CreatePlannedOperation(c echo.Context) error {
 	userID := c.Param("id")
 	user, err := h.store.GetUser(c.Request().Context(), userID)

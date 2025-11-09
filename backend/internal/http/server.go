@@ -45,6 +45,7 @@ func RegisterRoutes(e *echo.Echo, handlers *Handlers) {
 	api.GET("/users/:id/members", handlers.ListMembers)
 	api.POST("/transactions", handlers.CreateTransaction)
 	api.GET("/users/:id/transactions", handlers.ListTransactions)
+	api.GET("/users/:id/reports/overview", handlers.GetReportsOverview)
 	api.GET("/users/:id/planned-operations", handlers.ListPlannedOperations)
 	api.POST("/users/:id/planned-operations", handlers.CreatePlannedOperation)
 	api.POST("/users/:id/planned-operations/:operationId/complete", handlers.CompletePlannedOperation)

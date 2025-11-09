@@ -278,6 +278,38 @@ paths:
                       $ref: '#/components/schemas/Transaction'
         '404':
           description: Not found
+  /api/v1/users/{id}/reports/overview:
+    get:
+      summary: Get aggregated spending, income and account balances for a family
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: start_date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: RFC3339 timestamp inclusive lower bound
+        - name: end_date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: RFC3339 timestamp inclusive upper bound
+      responses:
+        '200':
+          description: Aggregated report for the selected period
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportsOverviewResponse'
+        '404':
+          description: Not found
   /api/v1/users/{id}/planned-operations:
     get:
       summary: List planned operations for a user
@@ -698,3 +730,89 @@ components:
           $ref: '#/components/schemas/PlannedOperation'
         transaction:
           $ref: '#/components/schemas/Transaction'
+    ReportsOverviewResponse:
+      type: object
+      properties:
+        reports:
+          $ref: '#/components/schemas/ReportsOverview'
+    ReportsOverview:
+      type: object
+      properties:
+        period:
+          $ref: '#/components/schemas/ReportPeriod'
+        expenses:
+          $ref: '#/components/schemas/MovementReport'
+        incomes:
+          $ref: '#/components/schemas/MovementReport'
+        account_balances:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccountBalanceReport'
+      required: [period, expenses, incomes, account_balances]
+    ReportPeriod:
+      type: object
+      properties:
+        start_date:
+          type: string
+          format: date-time
+          nullable: true
+        end_date:
+          type: string
+          format: date-time
+          nullable: true
+    MovementReport:
+      type: object
+      properties:
+        totals:
+          type: array
+          items:
+            $ref: '#/components/schemas/CurrencyAmount'
+        by_category:
+          type: array
+          items:
+            $ref: '#/components/schemas/CategoryReportItem'
+      required: [totals, by_category]
+    CurrencyAmount:
+      type: object
+      properties:
+        currency:
+          type: string
+        amount_minor:
+          type: integer
+          format: int64
+      required: [currency, amount_minor]
+    CategoryReportItem:
+      type: object
+      properties:
+        category_id:
+          type: string
+        category_name:
+          type: string
+        category_color:
+          type: string
+        currency:
+          type: string
+        amount_minor:
+          type: integer
+          format: int64
+      required: [category_id, category_name, category_color, currency, amount_minor]
+    AccountBalanceReport:
+      type: object
+      properties:
+        account_id:
+          type: string
+        account_name:
+          type: string
+        account_type:
+          type: string
+          enum: [cash, card, bank, deposit, wallet]
+        currency:
+          type: string
+        balance_minor:
+          type: integer
+          format: int64
+        is_shared:
+          type: boolean
+        is_archived:
+          type: boolean
+      required: [account_id, account_name, account_type, currency, balance_minor, is_shared, is_archived]
