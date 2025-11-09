@@ -14,6 +14,13 @@ private let displayFormatter: DateFormatter = {
     return formatter
 }()
 
+private let dateOnlyFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateStyle = .medium
+    formatter.timeStyle = .none
+    return formatter
+}()
+
 private let utcCalendar: Calendar = {
     var calendar = Calendar(identifier: .iso8601)
     calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
@@ -83,6 +90,20 @@ struct ContentView: View {
     @State private var transactionFilterType: TransactionTypeFilter = .all
     @State private var transactionFilterCategoryId: String = ""
     @State private var transactionFilterAccountId: String = ""
+    @State private var plannedOperations: [PlannedOperation] = []
+    @State private var completedPlannedOperations: [PlannedOperation] = []
+    @State private var plannedType: TransactionKind = .expense
+    @State private var plannedAccountId: String = ""
+    @State private var plannedCategoryId: String = ""
+    @State private var plannedTitle: String = ""
+    @State private var plannedAmount: String = ""
+    @State private var plannedDueDate: Date = Date()
+    @State private var plannedComment: String = ""
+    @State private var plannedRecurrence: PlannedRecurrence = .none
+    @State private var plannedMessage: String = ""
+    @State private var isPlannedLoading: Bool = false
+    @State private var isSavingPlan: Bool = false
+    @State private var completingPlanId: String? = nil
 
     var body: some View {
         NavigationView {
@@ -156,6 +177,7 @@ struct ContentView: View {
                     accountsSection(userId: user.id)
                     categoryForm(userId: user.id)
                     categoryLists(userId: user.id)
+                    plannedOperationsSection(user: user)
                     Divider()
                     transactionFilters()
                     transactionForm(user: user)
@@ -224,12 +246,17 @@ struct ContentView: View {
                 membersMessage = ""
                 familyIdInput = ""
                 accountShared = true
+                plannedAccountId = registerResponse.accounts.first?.id ?? ""
+                plannedOperations = []
+                completedPlannedOperations = []
+                plannedMessage = ""
                 refreshTransactionsForCurrentPeriod()
             }
 
             loadCategories(userId: registerResponse.user.id)
             loadAccounts(userId: registerResponse.user.id)
             loadMembers(userId: registerResponse.user.id)
+            loadPlannedOperations(for: registerResponse.user.id)
         }.resume()
     }
 
@@ -248,6 +275,9 @@ struct ContentView: View {
                     return !lhs.isArchived && rhs.isArchived
                 }
                 ensureTransactionCategorySelection()
+                if plannedCategoryId.isEmpty || !categories.contains(where: { $0.id == plannedCategoryId }) {
+                    plannedCategoryId = categories.first { !$0.isArchived && $0.type == plannedType.rawValue }?.id ?? ""
+                }
             }
         }.resume()
     }
@@ -262,6 +292,9 @@ struct ContentView: View {
             DispatchQueue.main.async {
                 accounts = response.accounts.sorted { $0.createdAt < $1.createdAt }
                 ensureTransactionAccountSelection()
+                if plannedAccountId.isEmpty || !accounts.contains(where: { $0.id == plannedAccountId }) {
+                    plannedAccountId = accounts.first?.id ?? ""
+                }
             }
         }.resume()
     }
@@ -700,6 +733,382 @@ struct ContentView: View {
         if !transactionFilterAccountId.isEmpty, !accounts.contains(where: { $0.id == transactionFilterAccountId }) {
             transactionFilterAccountId = ""
         }
+    }
+
+    private func loadPlannedOperations(for userId: String) {
+        guard let url = URL(string: "http://localhost:8080/api/v1/users/\(userId)/planned-operations") else { return }
+        DispatchQueue.main.async {
+            isPlannedLoading = true
+            plannedMessage = ""
+        }
+        URLSession.shared.dataTask(with: url) { data, _, error in
+            DispatchQueue.main.async {
+                isPlannedLoading = false
+            }
+            if let error = error {
+                DispatchQueue.main.async {
+                    plannedMessage = "Ошибка: \(error.localizedDescription)"
+                }
+                return
+            }
+            guard
+                let data = data,
+                let response = try? JSONDecoder().decode(PlannedOperationsResponse.self, from: data)
+            else {
+                DispatchQueue.main.async {
+                    plannedMessage = "Не удалось загрузить планы"
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                plannedOperations = response.plannedOperations.sorted { $0.dueAt < $1.dueAt }
+                completedPlannedOperations = response.completedOperations.sorted {
+                    ($0.lastCompletedAt ?? $0.updatedAt) > ($1.lastCompletedAt ?? $1.updatedAt)
+                }
+            }
+        }.resume()
+    }
+
+    private func savePlannedOperation(for user: User) {
+        guard let account = accounts.first(where: { $0.id == plannedAccountId }) else {
+            plannedMessage = "Выберите счёт"
+            return
+        }
+        let categoryId = plannedCategoryId.isEmpty
+            ? activeCategories.first(where: { $0.type == plannedType.rawValue })?.id
+            : plannedCategoryId
+        guard let category = activeCategories.first(where: { $0.id == categoryId }) else {
+            plannedMessage = "Выберите категорию"
+            return
+        }
+        let trimmedTitle = plannedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else {
+            plannedMessage = "Укажите название"
+            return
+        }
+        guard let amount = Int64(plannedAmount) else {
+            plannedMessage = "Сумма должна быть целым числом"
+            return
+        }
+        let dueDate = utcCalendar.startOfDay(for: plannedDueDate)
+        let payload = PlannedOperationPayload(
+            accountId: account.id,
+            categoryId: category.id,
+            type: plannedType.rawValue,
+            title: trimmedTitle,
+            amountMinor: amount,
+            currency: account.currency,
+            comment: plannedComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : plannedComment,
+            dueAt: isoFormatter.string(from: dueDate),
+            recurrence: plannedRecurrence.apiValue
+        )
+
+        guard let url = URL(string: "http://localhost:8080/api/v1/users/\(user.id)/planned-operations") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONEncoder().encode(payload)
+
+        plannedMessage = ""
+        isSavingPlan = true
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            DispatchQueue.main.async {
+                isSavingPlan = false
+            }
+            if let error = error {
+                DispatchQueue.main.async {
+                    plannedMessage = "Ошибка: \(error.localizedDescription)"
+                }
+                return
+            }
+            guard
+                let data = data,
+                let response = try? JSONDecoder().decode(PlannedOperationResponse.self, from: data)
+            else {
+                DispatchQueue.main.async {
+                    plannedMessage = "Некорректный ответ сервера"
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                plannedOperations.append(response.plannedOperation)
+                plannedOperations.sort { $0.dueAt < $1.dueAt }
+                plannedTitle = ""
+                plannedAmount = ""
+                plannedComment = ""
+                plannedDueDate = Date()
+                plannedRecurrence = .none
+                plannedMessage = "План сохранён"
+            }
+        }.resume()
+    }
+
+    private func completePlannedOperation(for user: User, plan: PlannedOperation) {
+        guard let url = URL(string: "http://localhost:8080/api/v1/users/\(user.id)/planned-operations/\(plan.id)/complete") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        completingPlanId = plan.id
+        plannedMessage = ""
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            DispatchQueue.main.async {
+                completingPlanId = nil
+            }
+            if let error = error {
+                DispatchQueue.main.async {
+                    plannedMessage = "Ошибка: \(error.localizedDescription)"
+                }
+                return
+            }
+            guard
+                let data = data,
+                let response = try? JSONDecoder().decode(PlannedOperationCompleteResponse.self, from: data)
+            else {
+                DispatchQueue.main.async {
+                    plannedMessage = "Некорректный ответ сервера"
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                let updated = response.plannedOperation
+                plannedOperations.removeAll { $0.id == plan.id }
+                if !updated.isCompleted {
+                    plannedOperations.append(updated)
+                    plannedOperations.sort { $0.dueAt < $1.dueAt }
+                }
+                completedPlannedOperations.removeAll { $0.id == plan.id }
+                if updated.isCompleted {
+                    completedPlannedOperations.append(updated)
+                    completedPlannedOperations.sort { ($0.lastCompletedAt ?? $0.updatedAt) > ($1.lastCompletedAt ?? $1.updatedAt) }
+                }
+                plannedMessage = "Операция выполнена"
+                loadAccounts(userId: user.id)
+                refreshTransactionsForCurrentPeriod()
+            }
+        }.resume()
+    }
+
+    @ViewBuilder
+    private func plannedOperationsSection(user: User) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Запланированные операции")
+                    .font(.headline)
+                Spacer()
+                Button("Обновить") {
+                    loadPlannedOperations(for: user.id)
+                }
+                .buttonStyle(.bordered)
+                .disabled(isPlannedLoading)
+            }
+
+            if isPlannedLoading {
+                ProgressView("Загрузка планов…")
+            }
+
+            if accounts.isEmpty {
+                Text("Создайте счёт, чтобы планировать будущие операции")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+
+            let availableCategories = activeCategories.filter { $0.type == plannedType.rawValue }
+            if availableCategories.isEmpty {
+                Text("Добавьте активную категорию выбранного типа, чтобы создать план")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Тип", selection: $plannedType) {
+                    ForEach(TransactionKind.allCases, id: \.self) { kind in
+                        Text(kind.localizedTitle).tag(kind)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: plannedType) { _ in
+                    let refreshed = activeCategories.filter { $0.type == plannedType.rawValue }
+                    if refreshed.first(where: { $0.id == plannedCategoryId }) == nil {
+                        plannedCategoryId = refreshed.first?.id ?? ""
+                    }
+                }
+
+                Picker("Счёт", selection: $plannedAccountId) {
+                    ForEach(accounts) { account in
+                        Text("\(account.name) · \(account.currency)").tag(account.id)
+                    }
+                }
+
+                Picker("Категория", selection: $plannedCategoryId) {
+                    ForEach(availableCategories) { category in
+                        Text(category.name).tag(category.id)
+                    }
+                }
+
+                TextField("Название", text: $plannedTitle)
+                    .textFieldStyle(.roundedBorder)
+
+                TextField("Сумма в минорных единицах", text: $plannedAmount)
+                    .textFieldStyle(.roundedBorder)
+                    .keyboardType(.numberPad)
+
+                DatePicker(
+                    "Дата выполнения",
+                    selection: $plannedDueDate,
+                    displayedComponents: .date
+                )
+
+                Picker("Повторение", selection: $plannedRecurrence) {
+                    ForEach(PlannedRecurrence.allCases) { recurrence in
+                        Text(recurrence.localizedTitle).tag(recurrence)
+                    }
+                }
+
+                TextField("Комментарий", text: $plannedComment)
+                    .textFieldStyle(.roundedBorder)
+
+                Button(action: { savePlannedOperation(for: user) }) {
+                    if isSavingPlan {
+                        ProgressView()
+                    }
+                    Text("Сохранить план")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isSavingPlan || accounts.isEmpty || availableCategories.isEmpty)
+            }
+            .padding()
+            .background(.ultraThinMaterial)
+            .cornerRadius(12)
+
+            if !plannedMessage.isEmpty {
+                Text(plannedMessage)
+                    .font(.footnote)
+                    .foregroundColor(plannedMessage.lowercased().contains("ошибка") ? .red : .secondary)
+            }
+
+            if !plannedOperations.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Ближайшие операции")
+                        .font(.subheadline)
+                    ForEach(plannedOperations) { plan in
+                        plannedOperationRow(user: user, plan: plan)
+                    }
+                }
+            } else if !isPlannedLoading {
+                Text("Нет запланированных операций")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+
+            if !completedPlannedOperations.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Выполненные планы")
+                        .font(.subheadline)
+                    ForEach(completedPlannedOperations) { plan in
+                        plannedOperationRow(user: user, plan: plan, isCompleted: true)
+                    }
+                }
+            }
+        }
+        .onAppear {
+            if activeCategories.first(where: { $0.id == plannedCategoryId && $0.type == plannedType.rawValue }) == nil {
+                plannedCategoryId = activeCategories.first { $0.type == plannedType.rawValue }?.id ?? ""
+            }
+            if accounts.first(where: { $0.id == plannedAccountId }) == nil {
+                plannedAccountId = accounts.first?.id ?? ""
+            }
+        }
+    }
+
+    private func plannedOperationRow(user: User, plan: PlannedOperation, isCompleted: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(plan.title)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                Spacer()
+                Text(formatPlanAmount(plan))
+                    .font(.subheadline)
+                    .foregroundColor(plan.type.tint)
+            }
+
+            Text("Счёт: \(accounts.first(where: { $0.id == plan.accountId })?.name ?? "Счёт не найден")")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Text("Категория: \(categories.first(where: { $0.id == plan.categoryId })?.name ?? "Категория")")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Text("Создатель: \(plan.creator.name) · \(plan.creator.roleTitle)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Text(isCompleted ? completionLabel(for: plan) : dueLabel(for: plan))
+                .font(.caption)
+                .foregroundColor(isCompleted ? .secondary : (plan.dueAt < Date() ? .red : .secondary))
+
+            Text(plannedRecurrenceLabel(plan.recurrence))
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            if let comment = plan.comment?.trimmingCharacters(in: .whitespacesAndNewlines), !comment.isEmpty {
+                Text(comment)
+                    .font(.footnote)
+            }
+
+            if !isCompleted {
+                Button(action: { completePlannedOperation(for: user, plan: plan) }) {
+                    if completingPlanId == plan.id {
+                        ProgressView()
+                    }
+                    Text("Отметить выполненной")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(completingPlanId != nil)
+            }
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .cornerRadius(12)
+    }
+
+    private func dueLabel(for plan: PlannedOperation) -> String {
+        let dateText = dateOnlyFormatter.string(from: plan.dueAt)
+        if plan.dueAt < Date() {
+            return "Просрочено: \(dateText)"
+        }
+        return "К исполнению: \(dateText)"
+    }
+
+    private func completionLabel(for plan: PlannedOperation) -> String {
+        guard let completed = plan.lastCompletedAt else {
+            return "Отмечено выполненным"
+        }
+        let dateText = displayFormatter.string(from: completed)
+        return "Выполнено: \(dateText)"
+    }
+
+    private func plannedRecurrenceLabel(_ recurrence: String?) -> String {
+        guard let recurrence, !recurrence.isEmpty else {
+            return "Не повторяется"
+        }
+        switch recurrence.lowercased() {
+        case "weekly":
+            return "Повторяется еженедельно"
+        case "monthly":
+            return "Повторяется ежемесячно"
+        case "yearly":
+            return "Повторяется ежегодно"
+        default:
+            return recurrence
+        }
+    }
+
+    private func formatPlanAmount(_ plan: PlannedOperation) -> String {
+        let amount = Double(plan.amountMinor) / 100.0
+        return String(format: "%@%.2f %@", plan.type.symbol, abs(amount), plan.currency)
     }
 
     @ViewBuilder
@@ -1404,6 +1813,31 @@ private enum TransactionKind: String, CaseIterable, Codable {
     }
 }
 
+private enum PlannedRecurrence: String, CaseIterable, Identifiable {
+    case none
+    case weekly
+    case monthly
+    case yearly
+
+    var id: String { rawValue }
+
+    var localizedTitle: String {
+        switch self {
+        case .none: return "Не повторяется"
+        case .weekly: return "Еженедельно"
+        case .monthly: return "Ежемесячно"
+        case .yearly: return "Ежегодно"
+        }
+    }
+
+    var apiValue: String? {
+        switch self {
+        case .none: return nil
+        case .weekly, .monthly, .yearly: return rawValue
+        }
+    }
+}
+
 private struct TransactionList: Decodable {
     let transactions: [Transaction]
 }
@@ -1490,4 +1924,137 @@ private struct TransactionRequest: Encodable {
 
 private struct TransactionResponse: Decodable {
     let transaction: Transaction
+}
+
+private struct PlannedOperation: Decodable, Identifiable {
+    let id: String
+    let familyId: String
+    let userId: String
+    let accountId: String
+    let categoryId: String
+    let type: TransactionKind
+    let title: String
+    let amountMinor: Int64
+    let currency: String
+    let comment: String?
+    let dueAt: Date
+    let recurrence: String?
+    let isCompleted: Bool
+    let lastCompletedAt: Date?
+    let createdAt: Date
+    let updatedAt: Date
+    let creator: FamilyMember
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case familyId = "family_id"
+        case userId = "user_id"
+        case accountId = "account_id"
+        case categoryId = "category_id"
+        case type
+        case title
+        case amountMinor = "amount_minor"
+        case currency
+        case comment
+        case dueAt = "due_at"
+        case recurrence
+        case isCompleted = "is_completed"
+        case lastCompletedAt = "last_completed_at"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case creator
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        familyId = try container.decode(String.self, forKey: .familyId)
+        userId = try container.decode(String.self, forKey: .userId)
+        accountId = try container.decode(String.self, forKey: .accountId)
+        categoryId = try container.decode(String.self, forKey: .categoryId)
+        type = try container.decode(TransactionKind.self, forKey: .type)
+        title = try container.decode(String.self, forKey: .title)
+        amountMinor = try container.decode(Int64.self, forKey: .amountMinor)
+        currency = try container.decode(String.self, forKey: .currency)
+        comment = try container.decodeIfPresent(String.self, forKey: .comment)
+        recurrence = try container.decodeIfPresent(String.self, forKey: .recurrence)
+        isCompleted = try container.decode(Bool.self, forKey: .isCompleted)
+        creator = try container.decode(FamilyMember.self, forKey: .creator)
+
+        func decodeDate(_ key: CodingKeys) throws -> Date {
+            let value = try container.decode(String.self, forKey: key)
+            if let date = isoFormatter.date(from: value) {
+                return date
+            }
+            throw DecodingError.dataCorruptedError(forKey: key, in: container, debugDescription: "Некорректный формат даты")
+        }
+
+        dueAt = try decodeDate(.dueAt)
+        createdAt = try decodeDate(.createdAt)
+        updatedAt = try decodeDate(.updatedAt)
+
+        if let rawCompleted = try container.decodeIfPresent(String.self, forKey: .lastCompletedAt) {
+            lastCompletedAt = isoFormatter.date(from: rawCompleted)
+        } else {
+            lastCompletedAt = nil
+        }
+    }
+}
+
+private struct PlannedOperationPayload: Encodable {
+    let accountId: String
+    let categoryId: String
+    let type: String
+    let title: String
+    let amountMinor: Int64
+    let currency: String
+    let comment: String?
+    let dueAt: String
+    let recurrence: String?
+
+    enum CodingKeys: String, CodingKey {
+        case accountId = "account_id"
+        case categoryId = "category_id"
+        case type
+        case title
+        case amountMinor = "amount_minor"
+        case currency
+        case comment
+        case dueAt = "due_at"
+        case recurrence
+    }
+}
+
+private struct PlannedOperationsResponse: Decodable {
+    let plannedOperations: [PlannedOperation]
+    let completedOperations: [PlannedOperation]
+
+    enum CodingKeys: String, CodingKey {
+        case plannedOperations = "planned_operations"
+        case completedOperations = "completed_operations"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        plannedOperations = try container.decodeIfPresent([PlannedOperation].self, forKey: .plannedOperations) ?? []
+        completedOperations = try container.decodeIfPresent([PlannedOperation].self, forKey: .completedOperations) ?? []
+    }
+}
+
+private struct PlannedOperationResponse: Decodable {
+    let plannedOperation: PlannedOperation
+
+    enum CodingKeys: String, CodingKey {
+        case plannedOperation = "planned_operation"
+    }
+}
+
+private struct PlannedOperationCompleteResponse: Decodable {
+    let plannedOperation: PlannedOperation
+    let transaction: Transaction?
+
+    enum CodingKeys: String, CodingKey {
+        case plannedOperation = "planned_operation"
+        case transaction
+    }
 }

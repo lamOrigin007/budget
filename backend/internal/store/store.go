@@ -18,6 +18,14 @@ type Store struct {
 
 var ErrAccountArchived = errors.New("account is archived")
 
+type PlannedOperationStatus string
+
+const (
+	PlannedOperationStatusAll       PlannedOperationStatus = "all"
+	PlannedOperationStatusPending   PlannedOperationStatus = "pending"
+	PlannedOperationStatusCompleted PlannedOperationStatus = "completed"
+)
+
 func New(db *sql.DB) *Store {
 	return &Store{db: db}
 }
@@ -229,6 +237,13 @@ func nullableString(value string) interface{} {
 	return value
 }
 
+func nullableTime(value *time.Time) interface{} {
+	if value == nil {
+		return nil
+	}
+	return value.UTC()
+}
+
 func (s *Store) CreateTransaction(ctx context.Context, txn *domain.Transaction) error {
 	dbTx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -369,4 +384,145 @@ func (s *Store) GetFamily(ctx context.Context, id string) (*domain.Family, error
 		return nil, err
 	}
 	return &family, nil
+}
+
+func (s *Store) CreatePlannedOperation(ctx context.Context, op *domain.PlannedOperation) error {
+	row := s.db.QueryRowContext(ctx, `SELECT family_id, is_archived FROM accounts WHERE id = ?`, op.AccountID)
+	var accountFamily string
+	var isArchived bool
+	if err := row.Scan(&accountFamily, &isArchived); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return sql.ErrNoRows
+		}
+		return err
+	}
+	if accountFamily != op.FamilyID {
+		return sql.ErrNoRows
+	}
+	if isArchived {
+		return ErrAccountArchived
+	}
+
+	_, err := s.db.ExecContext(ctx, `INSERT INTO planned_operations (id, family_id, user_id, account_id, category_id, type, title, amount_minor, currency, comment, due_at, recurrence, is_completed, last_completed_at, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		op.ID, op.FamilyID, op.UserID, op.AccountID, op.CategoryID, op.Type, op.Title, op.AmountMinor, op.Currency, nullableString(op.Comment), op.DueAt, nullableString(op.Recurrence), op.IsCompleted, nullableTime(op.LastCompletedAt), op.CreatedAt, op.UpdatedAt)
+	return err
+}
+
+func (s *Store) GetPlannedOperation(ctx context.Context, id string) (*domain.PlannedOperation, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, family_id, user_id, account_id, category_id, type, title, amount_minor, currency, comment, due_at, recurrence, is_completed, last_completed_at, created_at, updated_at FROM planned_operations WHERE id = ?`, id)
+	var op domain.PlannedOperation
+	var comment sql.NullString
+	var recurrence sql.NullString
+	var lastCompleted sql.NullTime
+	if err := row.Scan(&op.ID, &op.FamilyID, &op.UserID, &op.AccountID, &op.CategoryID, &op.Type, &op.Title, &op.AmountMinor, &op.Currency, &comment, &op.DueAt, &recurrence, &op.IsCompleted, &lastCompleted, &op.CreatedAt, &op.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if comment.Valid {
+		op.Comment = comment.String
+	}
+	if recurrence.Valid {
+		op.Recurrence = recurrence.String
+	}
+	if lastCompleted.Valid {
+		t := lastCompleted.Time
+		op.LastCompletedAt = &t
+	}
+	return &op, nil
+}
+
+func (s *Store) GetPlannedOperationWithCreator(ctx context.Context, id string) (*domain.PlannedOperationWithCreator, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT p.id, p.family_id, p.user_id, p.account_id, p.category_id, p.type, p.title, p.amount_minor, p.currency, p.comment, p.due_at, p.recurrence, p.is_completed, p.last_completed_at, p.created_at, p.updated_at,
+        u.id, u.name, u.email, u.role
+FROM planned_operations p
+JOIN users u ON u.id = p.user_id
+WHERE p.id = ?`, id)
+	var op domain.PlannedOperationWithCreator
+	var comment sql.NullString
+	var recurrence sql.NullString
+	var lastCompleted sql.NullTime
+	if err := row.Scan(&op.ID, &op.FamilyID, &op.UserID, &op.AccountID, &op.CategoryID, &op.Type, &op.Title, &op.AmountMinor, &op.Currency, &comment, &op.DueAt, &recurrence, &op.IsCompleted, &lastCompleted, &op.CreatedAt, &op.UpdatedAt,
+		&op.Creator.ID, &op.Creator.Name, &op.Creator.Email, &op.Creator.Role); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if comment.Valid {
+		op.Comment = comment.String
+	}
+	if recurrence.Valid {
+		op.Recurrence = recurrence.String
+	}
+	if lastCompleted.Valid {
+		t := lastCompleted.Time
+		op.LastCompletedAt = &t
+	}
+	return &op, nil
+}
+
+func (s *Store) ListPlannedOperationsByFamily(ctx context.Context, familyID string, status PlannedOperationStatus) ([]domain.PlannedOperationWithCreator, error) {
+	baseQuery := `SELECT p.id, p.family_id, p.user_id, p.account_id, p.category_id, p.type, p.title, p.amount_minor, p.currency, p.comment, p.due_at, p.recurrence, p.is_completed, p.last_completed_at, p.created_at, p.updated_at,
+        u.id, u.name, u.email, u.role
+FROM planned_operations p
+JOIN users u ON u.id = p.user_id
+WHERE p.family_id = ?`
+	args := []interface{}{familyID}
+	switch status {
+	case PlannedOperationStatusPending:
+		baseQuery += " AND p.is_completed = 0"
+	case PlannedOperationStatusCompleted:
+		baseQuery += " AND p.is_completed = 1"
+	}
+	order := " ORDER BY p.due_at ASC"
+	if status == PlannedOperationStatusCompleted {
+		order = " ORDER BY COALESCE(p.last_completed_at, p.updated_at) DESC"
+	}
+	rows, err := s.db.QueryContext(ctx, baseQuery+order, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ops []domain.PlannedOperationWithCreator
+	for rows.Next() {
+		var item domain.PlannedOperationWithCreator
+		var comment sql.NullString
+		var recurrence sql.NullString
+		var lastCompleted sql.NullTime
+		if err := rows.Scan(&item.ID, &item.FamilyID, &item.UserID, &item.AccountID, &item.CategoryID, &item.Type, &item.Title, &item.AmountMinor, &item.Currency, &comment, &item.DueAt, &recurrence, &item.IsCompleted, &lastCompleted, &item.CreatedAt, &item.UpdatedAt,
+			&item.Creator.ID, &item.Creator.Name, &item.Creator.Email, &item.Creator.Role); err != nil {
+			return nil, err
+		}
+		if comment.Valid {
+			item.Comment = comment.String
+		}
+		if recurrence.Valid {
+			item.Recurrence = recurrence.String
+		}
+		if lastCompleted.Valid {
+			t := lastCompleted.Time
+			item.LastCompletedAt = &t
+		}
+		ops = append(ops, item)
+	}
+	return ops, rows.Err()
+}
+
+func (s *Store) UpdatePlannedOperationStatus(ctx context.Context, op *domain.PlannedOperation) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE planned_operations SET due_at = ?, is_completed = ?, last_completed_at = ?, updated_at = ? WHERE id = ? AND family_id = ?`, op.DueAt, op.IsCompleted, nullableTime(op.LastCompletedAt), op.UpdatedAt, op.ID, op.FamilyID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }

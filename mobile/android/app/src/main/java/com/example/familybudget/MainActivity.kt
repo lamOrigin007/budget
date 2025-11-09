@@ -51,7 +51,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
@@ -110,6 +112,20 @@ fun BudgetScreen(client: HttpClient) {
     var transactionsMessage by remember { mutableStateOf("") }
     var isTransactionsLoading by remember { mutableStateOf(false) }
     var transactionMemberFilter by remember { mutableStateOf<String?>(null) }
+    var plannedOperations by remember { mutableStateOf(listOf<PlannedOperation>()) }
+    var completedPlannedOperations by remember { mutableStateOf(listOf<PlannedOperation>()) }
+    var plannedMessage by remember { mutableStateOf("") }
+    var isPlannedLoading by remember { mutableStateOf(false) }
+    var isPlannedSaving by remember { mutableStateOf(false) }
+    var completingPlanId by remember { mutableStateOf<String?>(null) }
+    var plannedType by remember { mutableStateOf("expense") }
+    var plannedAccountId by remember { mutableStateOf<String?>(null) }
+    var plannedCategoryId by remember { mutableStateOf<String?>(null) }
+    var plannedTitle by remember { mutableStateOf("") }
+    var plannedAmount by remember { mutableStateOf("") }
+    var plannedDue by remember { mutableStateOf(java.time.LocalDate.now().toString()) }
+    var plannedComment by remember { mutableStateOf("") }
+    var plannedRecurrence by remember { mutableStateOf("") }
 
     fun register() {
         CoroutineScope(Dispatchers.IO).launch {
@@ -132,6 +148,7 @@ fun BudgetScreen(client: HttpClient) {
                     family = response.family
                     status = "Профиль создан для ${'$'}{response.user.name}"
                     accounts = response.accounts
+                    plannedAccountId = response.accounts.firstOrNull()?.id
                     accountCurrency = response.user.currencyDefault
                     familyMembers = response.members
                     membersMessage = ""
@@ -143,6 +160,7 @@ fun BudgetScreen(client: HttpClient) {
                 loadAccounts(response.user.id)
                 loadMembers(response.user.id)
                 loadTransactions(response.user.id, null)
+                loadPlannedOperations(response.user.id)
             } catch (ex: Exception) {
                 withContext(Dispatchers.Main) {
                     status = "Ошибка: ${'$'}{ex.message}"
@@ -157,6 +175,7 @@ fun BudgetScreen(client: HttpClient) {
                 val list: CategoryList = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/categories").body()
                 withContext(Dispatchers.Main) {
                     categories = list.categories.sortedWith(compareBy({ it.isArchived }, { it.name }))
+                    plannedCategoryId = categories.firstOrNull { !it.isArchived && it.type == plannedType }?.id
                 }
             } catch (ex: Exception) {
                 withContext(Dispatchers.Main) {
@@ -172,6 +191,7 @@ fun BudgetScreen(client: HttpClient) {
                 val list: AccountList = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/accounts").body()
                 withContext(Dispatchers.Main) {
                     accounts = list.accounts.sortedBy { it.name }
+                    plannedAccountId = accounts.firstOrNull()?.id
                 }
             } catch (ex: Exception) {
                 withContext(Dispatchers.Main) {
@@ -229,6 +249,122 @@ fun BudgetScreen(client: HttpClient) {
                 withContext(Dispatchers.Main) {
                     transactionsMessage = "Не удалось загрузить операции: ${'$'}{ex.message}"
                     isTransactionsLoading = false
+                }
+            }
+        }
+    }
+
+    fun loadPlannedOperations(userId: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            withContext(Dispatchers.Main) {
+                isPlannedLoading = true
+                plannedMessage = ""
+            }
+            try {
+                val response: PlannedOperationsList = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/planned-operations").body()
+                withContext(Dispatchers.Main) {
+                    plannedOperations = response.planned.sortedBy { it.dueAt }
+                    completedPlannedOperations = response.completed.sortedByDescending { it.lastCompletedAt ?: it.updatedAt }
+                    isPlannedLoading = false
+                }
+            } catch (ex: Exception) {
+                withContext(Dispatchers.Main) {
+                    plannedMessage = "Не удалось загрузить планы: ${'$'}{ex.message}"
+                    isPlannedLoading = false
+                }
+            }
+        }
+    }
+
+    fun savePlannedOperation() {
+        val currentUser = user ?: return
+        val accountId = plannedAccountId
+        val categoryId = plannedCategoryId
+        if (accountId.isNullOrBlank() || categoryId.isNullOrBlank()) {
+            plannedMessage = "Выберите счёт и категорию"
+            return
+        }
+        if (plannedTitle.isBlank()) {
+            plannedMessage = "Укажите название операции"
+            return
+        }
+        val amountMinor = plannedAmount.toLongOrNull()
+        if (amountMinor == null || amountMinor <= 0) {
+            plannedMessage = "Введите сумму в минорных единицах"
+            return
+        }
+        val dueIso = try {
+            LocalDate.parse(plannedDue.ifBlank { LocalDate.now().toString() })
+                .atStartOfDay()
+                .atOffset(ZoneOffset.UTC)
+                .toString()
+        } catch (ex: Exception) {
+            plannedMessage = "Некорректная дата"
+            return
+        }
+        val accountCurrency = accounts.find { it.id == accountId }?.currency ?: currentUser.currencyDefault
+        val payload = PlannedOperationPayload(
+            accountId = accountId,
+            categoryId = categoryId,
+            type = plannedType,
+            title = plannedTitle.trim(),
+            amountMinor = amountMinor,
+            currency = accountCurrency,
+            comment = plannedComment.trim().ifEmpty { null },
+            dueAt = dueIso,
+            recurrence = plannedRecurrence.trim().ifEmpty { null }
+        )
+        CoroutineScope(Dispatchers.IO).launch {
+            withContext(Dispatchers.Main) {
+                isPlannedSaving = true
+                plannedMessage = ""
+            }
+            try {
+                val response: PlannedOperationResponse = client.post("http://10.0.2.2:8080/api/v1/users/${'$'}{currentUser.id}/planned-operations") {
+                    setBody(payload)
+                }.body()
+                withContext(Dispatchers.Main) {
+                    val created = response.plannedOperation
+                    plannedOperations = (plannedOperations + created).sortedBy { it.dueAt }
+                    plannedTitle = ""
+                    plannedAmount = ""
+                    plannedComment = ""
+                    plannedMessage = "План сохранён"
+                    isPlannedSaving = false
+                }
+            } catch (ex: Exception) {
+                withContext(Dispatchers.Main) {
+                    plannedMessage = "Ошибка: ${'$'}{ex.message}"
+                    isPlannedSaving = false
+                }
+            }
+        }
+    }
+
+    fun completePlannedOperation(plan: PlannedOperation) {
+        val currentUser = user ?: return
+        CoroutineScope(Dispatchers.IO).launch {
+            withContext(Dispatchers.Main) {
+                completingPlanId = plan.id
+                plannedMessage = ""
+            }
+            try {
+                val response: PlannedOperationCompleteResponse = client.post(
+                    "http://10.0.2.2:8080/api/v1/users/${'$'}{currentUser.id}/planned-operations/${'$'}{plan.id}/complete"
+                ) {}.body()
+                withContext(Dispatchers.Main) {
+                    completingPlanId = null
+                    val updated = response.plannedOperation
+                    plannedOperations = (plannedOperations.filter { it.id != plan.id } + listOfNotNull(if (updated.isCompleted) null else updated)).sortedBy { it.dueAt }
+                    completedPlannedOperations = (completedPlannedOperations.filter { it.id != plan.id } + if (updated.isCompleted) listOf(updated) else emptyList()).sortedByDescending { it.lastCompletedAt ?: it.updatedAt }
+                    plannedMessage = "Операция выполнена"
+                }
+                loadTransactions(currentUser.id, transactionMemberFilter)
+                loadAccounts(currentUser.id)
+            } catch (ex: Exception) {
+                withContext(Dispatchers.Main) {
+                    completingPlanId = null
+                    plannedMessage = "Не удалось завершить операцию: ${'$'}{ex.message}"
                 }
             }
         }
@@ -448,6 +584,38 @@ fun BudgetScreen(client: HttpClient) {
                     onCreate = { createAccount() }
                 )
                 Spacer(modifier = Modifier.height(16.dp))
+                PlannedOperationsSection(
+                    plannedOperations = plannedOperations,
+                    completedOperations = completedPlannedOperations,
+                    accounts = accounts,
+                    categories = categories,
+                    plannedType = plannedType,
+                    plannedAccountId = plannedAccountId,
+                    plannedCategoryId = plannedCategoryId,
+                    plannedTitle = plannedTitle,
+                    plannedAmount = plannedAmount,
+                    plannedDue = plannedDue,
+                    plannedComment = plannedComment,
+                    plannedRecurrence = plannedRecurrence,
+                    message = plannedMessage,
+                    isLoading = isPlannedLoading,
+                    isSaving = isPlannedSaving,
+                    completingPlanId = completingPlanId,
+                    onTypeChange = { type ->
+                        plannedType = type
+                        plannedCategoryId = categories.firstOrNull { !it.isArchived && it.type == type }?.id
+                    },
+                    onAccountChange = { plannedAccountId = it },
+                    onCategoryChange = { plannedCategoryId = it },
+                    onTitleChange = { plannedTitle = it },
+                    onAmountChange = { plannedAmount = it },
+                    onDueChange = { plannedDue = it },
+                    onCommentChange = { plannedComment = it },
+                    onRecurrenceChange = { plannedRecurrence = it },
+                    onSave = { savePlannedOperation() },
+                    onComplete = { completePlannedOperation(it) }
+                )
+                Spacer(modifier = Modifier.height(16.dp))
                 TransactionsSection(
                     transactions = transactions,
                     categories = categories,
@@ -598,6 +766,222 @@ private fun TransactionsSection(
                             )
                             transaction.comment?.takeIf { it.isNotBlank() }?.let {
                                 Text(it, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlannedOperationsSection(
+    plannedOperations: List<PlannedOperation>,
+    completedOperations: List<PlannedOperation>,
+    accounts: List<Account>,
+    categories: List<Category>,
+    plannedType: String,
+    plannedAccountId: String?,
+    plannedCategoryId: String?,
+    plannedTitle: String,
+    plannedAmount: String,
+    plannedDue: String,
+    plannedComment: String,
+    plannedRecurrence: String,
+    message: String,
+    isLoading: Boolean,
+    isSaving: Boolean,
+    completingPlanId: String?,
+    onTypeChange: (String) -> Unit,
+    onAccountChange: (String) -> Unit,
+    onCategoryChange: (String) -> Unit,
+    onTitleChange: (String) -> Unit,
+    onAmountChange: (String) -> Unit,
+    onDueChange: (String) -> Unit,
+    onCommentChange: (String) -> Unit,
+    onRecurrenceChange: (String) -> Unit,
+    onSave: () -> Unit,
+    onComplete: (PlannedOperation) -> Unit
+) {
+    val accountLabel = accounts.find { it.id == plannedAccountId }?.let { "${it.name} · ${it.currency}" } ?: "Не выбран"
+    val availableCategories = remember(categories, plannedType) {
+        categories.filter { !it.isArchived && it.type == plannedType }
+    }
+    val categoryLabel = availableCategories.find { it.id == plannedCategoryId }?.name ?: "Не выбрана"
+    var accountMenuExpanded by remember { mutableStateOf(false) }
+    var categoryMenuExpanded by remember { mutableStateOf(false) }
+    val canSave = plannedTitle.isNotBlank() && plannedAmount.isNotBlank() && plannedAccountId != null && plannedCategoryId != null
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Планирование операций", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(
+                "Добавьте регулярные платежи и отмечайте их выполнение — операция попадёт в журнал автоматически.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.secondary
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("expense" to "Расход", "income" to "Доход").forEach { (value, label) ->
+                    OutlinedButton(onClick = { onTypeChange(value) }, enabled = plannedType != value) {
+                        Text(label)
+                    }
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box {
+                    OutlinedButton(onClick = { accountMenuExpanded = true }, enabled = accounts.isNotEmpty()) {
+                        Text("Счёт: ${accountLabel}")
+                    }
+                    DropdownMenu(expanded = accountMenuExpanded, onDismissRequest = { accountMenuExpanded = false }) {
+                        accounts.forEach { account ->
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text("${account.name} · ${account.currency}") },
+                                onClick = {
+                                    onAccountChange(account.id)
+                                    accountMenuExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+                Box {
+                    OutlinedButton(onClick = { categoryMenuExpanded = true }, enabled = availableCategories.isNotEmpty()) {
+                        Text("Категория: ${categoryLabel}")
+                    }
+                    DropdownMenu(expanded = categoryMenuExpanded, onDismissRequest = { categoryMenuExpanded = false }) {
+                        availableCategories.forEach { category ->
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text(category.name) },
+                                onClick = {
+                                    onCategoryChange(category.id)
+                                    categoryMenuExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = plannedTitle,
+                    onValueChange = onTitleChange,
+                    label = { Text("Название") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = plannedAmount,
+                    onValueChange = onAmountChange,
+                    label = { Text("Сумма (в копейках)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = plannedDue,
+                    onValueChange = onDueChange,
+                    label = { Text("Дата исполнения (ГГГГ-ММ-ДД)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = plannedComment,
+                    onValueChange = onCommentChange,
+                    label = { Text("Комментарий") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("" to "Один раз", "weekly" to "Еженедельно", "monthly" to "Ежемесячно", "yearly" to "Ежегодно").forEach { (value, label) ->
+                        if (plannedRecurrence == value) {
+                            Button(onClick = { onRecurrenceChange(value) }, enabled = false) { Text(label) }
+                        } else {
+                            OutlinedButton(onClick = { onRecurrenceChange(value) }) { Text(label) }
+                        }
+                    }
+                }
+                Button(onClick = onSave, enabled = canSave && !isSaving) {
+                    Text(if (isSaving) "Сохранение..." else "Сохранить план")
+                }
+                if (message.isNotEmpty()) {
+                    val color = if (message.startsWith("Ошибка") || message.startsWith("Не удалось")) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.secondary
+                    }
+                    Text(message, style = MaterialTheme.typography.bodySmall, color = color)
+                }
+                if (availableCategories.isEmpty()) {
+                    Text(
+                        "Добавьте категорию типа «${if (plannedType == "expense") "Расход" else "Доход"}», чтобы планировать операции.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+            }
+            Text("Ближайшие операции", style = MaterialTheme.typography.titleSmall)
+            if (isLoading) {
+                Text("Загрузка планов...", style = MaterialTheme.typography.bodySmall)
+            } else if (plannedOperations.isEmpty()) {
+                Text("Нет запланированных операций", style = MaterialTheme.typography.bodySmall)
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    plannedOperations.forEach { plan ->
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(plan.title, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "Счёт: ${accounts.find { it.id == plan.accountId }?.name ?: "неизвестно"}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Text(
+                                    "Категория: ${categories.find { it.id == plan.categoryId }?.name ?: "неизвестно"}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Text(
+                                    "Сумма: " + String.format(Locale("ru"), "%.2f %s", plan.amountMinor / 100.0, plan.currency),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text("К оплате: ${formatPlanDate(plan.dueAt)}", style = MaterialTheme.typography.bodySmall)
+                                Text("Повторение: ${formatRecurrenceLabel(plan.recurrence)}", style = MaterialTheme.typography.bodySmall)
+                                plan.lastCompletedAt?.let {
+                                    Text("Последнее выполнение: ${formatDateTime(it)}", style = MaterialTheme.typography.bodySmall)
+                                }
+                                Button(
+                                    onClick = { onComplete(plan) },
+                                    enabled = completingPlanId != plan.id,
+                                    modifier = Modifier.align(Alignment.End)
+                                ) {
+                                    Text(if (completingPlanId == plan.id) "Отмечаем..." else "Отметить выполненной")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Text("Завершённые операции", style = MaterialTheme.typography.titleSmall)
+            if (isLoading) {
+                Text("Загрузка...")
+            } else if (completedOperations.isEmpty()) {
+                Text("Пока нет завершённых планов", style = MaterialTheme.typography.bodySmall)
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    completedOperations.forEach { plan ->
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(plan.title, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "Счёт: ${accounts.find { it.id == plan.accountId }?.name ?: "неизвестно"}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Text(
+                                    "Категория: ${categories.find { it.id == plan.categoryId }?.name ?: "неизвестно"}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Text(
+                                    "Сумма: " + String.format(Locale("ru"), "%.2f %s", plan.amountMinor / 100.0, plan.currency),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                plan.lastCompletedAt?.let {
+                                    Text("Завершено: ${formatDateTime(it)}", style = MaterialTheme.typography.bodySmall)
+                                }
+                                Text("Повторение: ${formatRecurrenceLabel(plan.recurrence)}", style = MaterialTheme.typography.bodySmall)
                             }
                         }
                     }
@@ -902,6 +1286,23 @@ private fun formatDateTime(value: String): String = try {
     value
 }
 
+private val plannedDateFormatter: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("dd MMM yyyy").withLocale(Locale("ru")).withZone(ZoneId.systemDefault())
+
+private fun formatPlanDate(value: String): String = try {
+    plannedDateFormatter.format(Instant.parse(value))
+} catch (_: Exception) {
+    value
+}
+
+private fun formatRecurrenceLabel(recurrence: String?): String = when (recurrence) {
+    null, "", "none" -> "Единожды"
+    "weekly" -> "Еженедельно"
+    "monthly" -> "Ежемесячно"
+    "yearly" -> "Ежегодно"
+    else -> recurrence
+}
+
 @Serializable
 private data class RegisterRequest(
     val email: String,
@@ -1036,4 +1437,55 @@ private data class Transaction(
     @SerialName("created_at") val createdAt: String,
     @SerialName("updated_at") val updatedAt: String,
     val author: FamilyMember
+)
+
+@Serializable
+private data class PlannedOperationsList(
+    @SerialName("planned_operations") val planned: List<PlannedOperation>,
+    @SerialName("completed_operations") val completed: List<PlannedOperation>
+)
+
+@Serializable
+private data class PlannedOperationResponse(
+    @SerialName("planned_operation") val plannedOperation: PlannedOperation
+)
+
+@Serializable
+private data class PlannedOperation(
+    val id: String,
+    @SerialName("family_id") val familyId: String,
+    @SerialName("user_id") val userId: String,
+    @SerialName("account_id") val accountId: String,
+    @SerialName("category_id") val categoryId: String,
+    val type: String,
+    val title: String,
+    @SerialName("amount_minor") val amountMinor: Long,
+    val currency: String,
+    val comment: String? = null,
+    @SerialName("due_at") val dueAt: String,
+    val recurrence: String? = null,
+    @SerialName("is_completed") val isCompleted: Boolean,
+    @SerialName("last_completed_at") val lastCompletedAt: String? = null,
+    @SerialName("created_at") val createdAt: String,
+    @SerialName("updated_at") val updatedAt: String,
+    val creator: FamilyMember
+)
+
+@Serializable
+private data class PlannedOperationPayload(
+    @SerialName("account_id") val accountId: String,
+    @SerialName("category_id") val categoryId: String,
+    val type: String,
+    val title: String,
+    @SerialName("amount_minor") val amountMinor: Long,
+    val currency: String,
+    val comment: String? = null,
+    @SerialName("due_at") val dueAt: String,
+    val recurrence: String? = null
+)
+
+@Serializable
+private data class PlannedOperationCompleteResponse(
+    @SerialName("planned_operation") val plannedOperation: PlannedOperation,
+    val transaction: Transaction
 )
