@@ -1,4 +1,7 @@
 .DS_Store
 .vscode
 .idea
+web/node_modules
+web/.next
+mobile/android/.gradle
 

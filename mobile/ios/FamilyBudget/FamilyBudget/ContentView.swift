@@ -53,6 +53,9 @@ struct ContentView: View {
     @State private var status = "Создайте владельца семьи"
     @State private var user: User? = nil
     @State private var family: Family? = nil
+    @State private var accessScopeMessage: String = ""
+    @State private var accessScopeError: String = ""
+    @State private var isScopeLoading: Bool = false
     @State private var categories: [Category] = []
     @State private var accounts: [Account] = []
     @State private var familyMembers: [FamilyMember] = []
@@ -185,16 +188,25 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(family?.name ?? "")
                             .font(.headline)
-                        if let currency = family?.currencyBase {
-                            Text("Валюта семьи: \(currency)")
-                                .font(.footnote)
-                                .foregroundColor(.secondary)
-                        }
-                        if let family = family {
-                            Text("Доступ ограничен семьёй \(family.name) (ID \(family.id))", style: .footnote)
-                                .foregroundColor(.secondary)
-                        }
+                    if let currency = family?.currencyBase {
+                        Text("Валюта семьи: \(currency)")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
                     }
+                    if isScopeLoading {
+                        Text("Определяем область доступа", style: .footnote)
+                            .foregroundColor(.secondary)
+                    } else if !accessScopeError.isEmpty {
+                        Text(accessScopeError, style: .footnote)
+                            .foregroundColor(.red)
+                    } else if !accessScopeMessage.isEmpty {
+                        Text(accessScopeMessage, style: .footnote)
+                            .foregroundColor(.secondary)
+                    } else if let family = family {
+                        Text("Доступ ограничен семьёй \(family.name) (ID \(family.id))", style: .footnote)
+                            .foregroundColor(.secondary)
+                    }
+                }
                     settingsSection(user: user)
                     membersSection(userId: user.id)
                     accountsSection(userId: user.id)
@@ -279,6 +291,9 @@ struct ContentView: View {
                     membersMessage = ""
                     familyIdInput = ""
                     accountShared = true
+                    accessScopeMessage = registerResponse.scope.message
+                    accessScopeError = ""
+                    isScopeLoading = false
                     plannedAccountId = registerResponse.accounts.first?.id ?? ""
                     plannedOperations = []
                     completedPlannedOperations = []
@@ -303,6 +318,7 @@ struct ContentView: View {
                 loadPlannedOperations(for: registerResponse.user.id)
                 loadReportsForCurrentPeriod()
                 loadSettings(userId: registerResponse.user.id)
+                loadAccessScope(userId: registerResponse.user.id)
         }.resume()
     }
 
@@ -383,6 +399,40 @@ struct ContentView: View {
                     transactionFilterUserId = ""
                     refreshTransactionsForCurrentPeriod()
                 }
+            }
+        }.resume()
+    }
+
+    private func loadAccessScope(userId: String) {
+        guard let url = URL(string: "http://localhost:8080/api/v1/access/scope") else { return }
+        DispatchQueue.main.async {
+            isScopeLoading = true
+            accessScopeError = ""
+        }
+        var request = URLRequest(url: url)
+        request.setValue(userId, forHTTPHeaderField: "X-User-ID")
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            DispatchQueue.main.async {
+                isScopeLoading = false
+            }
+            if let error = error {
+                DispatchQueue.main.async {
+                    accessScopeError = "Не удалось получить область доступа: \(error.localizedDescription)"
+                }
+                return
+            }
+            guard
+                let data = data,
+                let response = try? JSONDecoder().decode(AccessScopeResponse.self, from: data)
+            else {
+                DispatchQueue.main.async {
+                    accessScopeError = "Некорректный ответ сервера при получении области доступа"
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                accessScopeMessage = response.scope.message
+                accessScopeError = ""
             }
         }.resume()
     }
@@ -2193,6 +2243,25 @@ private struct RegisterResponse: Codable {
     let accounts: [Account]
     let members: [FamilyMember]
     let categories: [Category]
+    let scope: AccessScope
+}
+
+private struct AccessScopeResponse: Codable {
+    let scope: AccessScope
+}
+
+private struct AccessScope: Codable {
+    let mode: String
+    let familyId: String
+    let familyName: String
+    let message: String
+
+    enum CodingKeys: String, CodingKey {
+        case mode
+        case familyId = "family_id"
+        case familyName = "family_name"
+        case message
+    }
 }
 
 private struct DisplaySettings: Codable {

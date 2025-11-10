@@ -217,6 +217,14 @@ export interface RegisterResponse {
   categories: Category[];
   accounts: Account[];
   members: FamilyMember[];
+  scope: AccessScope;
+}
+
+export interface AccessScope {
+  mode: 'family';
+  family_id: string;
+  family_name: string;
+  message: string;
 }
 
 export interface TransactionRequest {
@@ -281,6 +289,11 @@ export async function registerUser(payload: RegisterRequest): Promise<RegisterRe
     method: 'POST',
     body: JSON.stringify(payload)
   });
+}
+
+export async function fetchAccessScope(userId: string): Promise<AccessScope> {
+  const data = await request<{ scope: AccessScope }>('/api/v1/access/scope', undefined, userId);
+  return data.scope;
 }
 
 export async function fetchCategories(userId: string): Promise<Category[]> {

@@ -55,6 +55,7 @@ func RegisterRoutes(e *echo.Echo, handlers *Handlers) {
 	secured.GET("/users/:id/planned-operations", handlers.ListPlannedOperations)
 	secured.POST("/users/:id/planned-operations", handlers.CreatePlannedOperation)
 	secured.POST("/users/:id/planned-operations/:operationId/complete", handlers.CompletePlannedOperation)
+	secured.GET("/access/scope", handlers.GetAccessScope)
 }
 
 type HealthResponse struct {

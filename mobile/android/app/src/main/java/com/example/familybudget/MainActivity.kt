@@ -28,6 +28,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -91,6 +92,9 @@ fun BudgetScreen(client: HttpClient) {
     var status by remember { mutableStateOf("Создайте владельца семьи") }
     var user by remember { mutableStateOf<User?>(null) }
     var family by remember { mutableStateOf<Family?>(null) }
+    var accessScopeMessage by remember { mutableStateOf<String?>(null) }
+    var accessScopeError by remember { mutableStateOf<String?>(null) }
+    var isScopeLoading by remember { mutableStateOf(false) }
     var categories by remember { mutableStateOf(listOf<Category>()) }
     var accounts by remember { mutableStateOf(listOf<Account>()) }
     var familyMembers by remember { mutableStateOf(listOf<FamilyMember>()) }
@@ -147,6 +151,11 @@ fun BudgetScreen(client: HttpClient) {
     var showArchivedSetting by remember { mutableStateOf(false) }
     var showTotalsInFamilyCurrency by remember { mutableStateOf(true) }
 
+    LaunchedEffect(user?.id) {
+        val id = user?.id ?: return@LaunchedEffect
+        loadAccessScope(id)
+    }
+
     fun register() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -176,6 +185,9 @@ fun BudgetScreen(client: HttpClient) {
                     familyId = ""
                     transactionMemberFilter = null
                     accountShared = true
+                    accessScopeMessage = response.scope.message
+                    accessScopeError = null
+                    isScopeLoading = false
                     familyCurrencySetting = response.family.currencyBase
                     userCurrencySetting = response.user.currencyDefault
                     localeSetting = response.user.locale
@@ -192,6 +204,7 @@ fun BudgetScreen(client: HttpClient) {
                 loadPlannedOperations(response.user.id)
                 loadReports(response.user.id)
                 loadSettings(response.user.id)
+                loadAccessScope(response.user.id)
             } catch (ex: Exception) {
                 withContext(Dispatchers.Main) {
                     status = "Ошибка: ${'$'}{ex.message}"
@@ -264,6 +277,32 @@ fun BudgetScreen(client: HttpClient) {
                 withContext(Dispatchers.Main) {
                     membersMessage = "Не удалось загрузить участников: ${'$'}{ex.message}"
                     isMembersLoading = false
+                }
+            }
+        }
+    }
+
+    fun loadAccessScope(userId: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            withContext(Dispatchers.Main) {
+                isScopeLoading = true
+                accessScopeError = null
+            }
+            try {
+                val scopeResponse: AccessScopeResponse = client.get("http://10.0.2.2:8080/api/v1/access/scope") {
+                    headers {
+                        append("X-User-ID", userId)
+                    }
+                }.body()
+                withContext(Dispatchers.Main) {
+                    accessScopeMessage = scopeResponse.scope.message
+                    accessScopeError = null
+                    isScopeLoading = false
+                }
+            } catch (ex: Exception) {
+                withContext(Dispatchers.Main) {
+                    accessScopeError = "Не удалось получить область доступа: ${'$'}{ex.message}"
+                    isScopeLoading = false
                 }
             }
         }
@@ -813,13 +852,41 @@ fun BudgetScreen(client: HttpClient) {
             }
             if (user != null) {
                 Spacer(modifier = Modifier.height(16.dp))
-                family?.let { currentFamily ->
-                    Text(
-                        text = "Вы работаете только с данными семьи \"${'$'}{currentFamily.name}\" (ID ${'$'}{currentFamily.id}).",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.secondary
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
+                when {
+                    isScopeLoading -> {
+                        Text(
+                            text = "Определяем область доступа...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.secondary
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                    accessScopeError != null -> {
+                        Text(
+                            text = accessScopeError ?: "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                    !accessScopeMessage.isNullOrBlank() -> {
+                        Text(
+                            text = accessScopeMessage ?: "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.secondary
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                    else -> {
+                        family?.let { currentFamily ->
+                            Text(
+                                text = "Вы работаете только с данными семьи \"${'$'}{currentFamily.name}\" (ID ${'$'}{currentFamily.id}).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                    }
                 }
                 SettingsSection(
                     user = user,
@@ -1908,7 +1975,21 @@ private data class RegisterResponse(
     val family: Family,
     val categories: List<Category>,
     val accounts: List<Account>,
-    val members: List<FamilyMember>
+    val members: List<FamilyMember>,
+    val scope: AccessScope
+)
+
+@Serializable
+private data class AccessScopeResponse(
+    val scope: AccessScope
+)
+
+@Serializable
+private data class AccessScope(
+    val mode: String,
+    @SerialName("family_id") val familyId: String,
+    @SerialName("family_name") val familyName: String,
+    val message: String
 )
 
 @Serializable
