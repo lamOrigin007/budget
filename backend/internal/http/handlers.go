@@ -24,9 +24,13 @@ type Handlers struct {
 var (
 	errParentNotFound = errors.New("parent category not found")
 	errParentArchived = errors.New("parent category is archived")
+	errUserNotFound   = errors.New("user not found")
+	errFamilyMismatch = errors.New("family mismatch")
 )
 
 var supportedCurrencies = []string{"RUB", "USD", "EUR", "KZT", "BYN", "UAH", "GBP"}
+
+const currentUserContextKey = "currentUser"
 
 type RegisterRequest struct {
 	Email      string `json:"email"`
@@ -153,6 +157,70 @@ func NewHandlers(store *store.Store) *Handlers {
 	return &Handlers{store: store}
 }
 
+func (h *Handlers) RequireAuth(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		userID := strings.TrimSpace(c.Request().Header.Get("X-User-ID"))
+		if userID == "" {
+			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "missing X-User-ID header"})
+		}
+
+		user, err := h.store.GetUser(c.Request().Context(), userID)
+		if err != nil {
+			return err
+		}
+		if user == nil {
+			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid user"})
+		}
+
+		c.Set(currentUserContextKey, user)
+		return next(c)
+	}
+}
+
+func currentUserFromContext(c echo.Context) *domain.User {
+	if value := c.Get(currentUserContextKey); value != nil {
+		if user, ok := value.(*domain.User); ok {
+			return user
+		}
+	}
+	return nil
+}
+
+func (h *Handlers) resolvePathUser(c echo.Context) (*domain.User, error) {
+	current := currentUserFromContext(c)
+	if current == nil {
+		return nil, errors.New("missing current user in context")
+	}
+
+	targetID := strings.TrimSpace(c.Param("id"))
+	if targetID == "" || targetID == current.ID {
+		return current, nil
+	}
+
+	user, err := h.store.GetUser(c.Request().Context(), targetID)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return nil, errUserNotFound
+	}
+	if user.FamilyID != current.FamilyID {
+		return nil, errFamilyMismatch
+	}
+	return user, nil
+}
+
+func (h *Handlers) handleUserAccessError(c echo.Context, err error) error {
+	switch {
+	case errors.Is(err, errUserNotFound):
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+	case errors.Is(err, errFamilyMismatch):
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "forbidden"})
+	default:
+		return err
+	}
+}
+
 func (h *Handlers) RegisterUser(c echo.Context) error {
 	var req RegisterRequest
 	if err := c.Bind(&req); err != nil {
@@ -253,14 +321,11 @@ func defaultLocale(locale string) string {
 }
 
 func (h *Handlers) GetUser(c echo.Context) error {
-	id := c.Param("id")
-	user, err := h.store.GetUser(c.Request().Context(), id)
+	user, err := h.resolvePathUser(c)
 	if err != nil {
-		return err
+		return h.handleUserAccessError(c, err)
 	}
-	if user == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
-	}
+
 	family, err := h.store.GetFamily(c.Request().Context(), user.FamilyID)
 	if err != nil {
 		return err
@@ -272,14 +337,11 @@ func (h *Handlers) GetUser(c echo.Context) error {
 }
 
 func (h *Handlers) GetUserSettings(c echo.Context) error {
-	userID := c.Param("id")
-	user, err := h.store.GetUser(c.Request().Context(), userID)
+	user, err := h.resolvePathUser(c)
 	if err != nil {
-		return err
+		return h.handleUserAccessError(c, err)
 	}
-	if user == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
-	}
+
 	family, err := h.store.GetFamily(c.Request().Context(), user.FamilyID)
 	if err != nil {
 		return err
@@ -315,13 +377,18 @@ func (h *Handlers) GetUserSettings(c echo.Context) error {
 }
 
 func (h *Handlers) UpdateUserSettings(c echo.Context) error {
-	userID := c.Param("id")
-	user, err := h.store.GetUser(c.Request().Context(), userID)
-	if err != nil {
-		return err
+	current := currentUserFromContext(c)
+	if current == nil {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	}
-	if user == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+
+	user, err := h.resolvePathUser(c)
+	if err != nil {
+		return h.handleUserAccessError(c, err)
+	}
+
+	if current.ID != user.ID {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "cannot modify other members"})
 	}
 
 	var req UpdateUserSettingsRequest
@@ -361,7 +428,7 @@ func (h *Handlers) UpdateUserSettings(c echo.Context) error {
 	}
 
 	if req.FamilyCurrency != "" && req.FamilyCurrency != family.CurrencyBase {
-		if user.Role != "owner" {
+		if current.Role != "owner" {
 			return c.JSON(http.StatusForbidden, map[string]string{"error": "only owner can change family currency"})
 		}
 		updatedFamily, err := h.store.UpdateFamilyCurrency(c.Request().Context(), family.ID, req.FamilyCurrency)
@@ -446,13 +513,9 @@ func isSupportedCurrency(code string) bool {
 }
 
 func (h *Handlers) ListCategories(c echo.Context) error {
-	userID := c.Param("id")
-	user, err := h.store.GetUser(c.Request().Context(), userID)
+	user, err := h.resolvePathUser(c)
 	if err != nil {
-		return err
-	}
-	if user == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+		return h.handleUserAccessError(c, err)
 	}
 	categories, err := h.store.ListCategoriesByFamily(c.Request().Context(), user.FamilyID)
 	if err != nil {
@@ -462,13 +525,9 @@ func (h *Handlers) ListCategories(c echo.Context) error {
 }
 
 func (h *Handlers) ListAccounts(c echo.Context) error {
-	userID := c.Param("id")
-	user, err := h.store.GetUser(c.Request().Context(), userID)
+	user, err := h.resolvePathUser(c)
 	if err != nil {
-		return err
-	}
-	if user == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+		return h.handleUserAccessError(c, err)
 	}
 	accounts, err := h.store.ListAccountsByFamily(c.Request().Context(), user.FamilyID)
 	if err != nil {
@@ -478,13 +537,9 @@ func (h *Handlers) ListAccounts(c echo.Context) error {
 }
 
 func (h *Handlers) ListMembers(c echo.Context) error {
-	userID := c.Param("id")
-	user, err := h.store.GetUser(c.Request().Context(), userID)
+	user, err := h.resolvePathUser(c)
 	if err != nil {
-		return err
-	}
-	if user == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+		return h.handleUserAccessError(c, err)
 	}
 	members, err := h.store.ListFamilyMembers(c.Request().Context(), user.FamilyID)
 	if err != nil {
@@ -494,13 +549,9 @@ func (h *Handlers) ListMembers(c echo.Context) error {
 }
 
 func (h *Handlers) CreateCategory(c echo.Context) error {
-	userID := c.Param("id")
-	user, err := h.store.GetUser(c.Request().Context(), userID)
+	user, err := h.resolvePathUser(c)
 	if err != nil {
-		return err
-	}
-	if user == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+		return h.handleUserAccessError(c, err)
 	}
 
 	var req CategoryRequest
@@ -546,13 +597,9 @@ func (h *Handlers) CreateCategory(c echo.Context) error {
 }
 
 func (h *Handlers) CreateAccount(c echo.Context) error {
-	userID := c.Param("id")
-	user, err := h.store.GetUser(c.Request().Context(), userID)
+	user, err := h.resolvePathUser(c)
 	if err != nil {
-		return err
-	}
-	if user == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+		return h.handleUserAccessError(c, err)
 	}
 
 	var req AccountRequest
@@ -590,15 +637,11 @@ func (h *Handlers) CreateAccount(c echo.Context) error {
 }
 
 func (h *Handlers) UpdateCategory(c echo.Context) error {
-	userID := c.Param("id")
 	categoryID := c.Param("categoryId")
 
-	user, err := h.store.GetUser(c.Request().Context(), userID)
+	user, err := h.resolvePathUser(c)
 	if err != nil {
-		return err
-	}
-	if user == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+		return h.handleUserAccessError(c, err)
 	}
 
 	category, err := h.store.GetCategory(c.Request().Context(), categoryID)
@@ -655,15 +698,11 @@ func (h *Handlers) UpdateCategory(c echo.Context) error {
 }
 
 func (h *Handlers) ToggleCategoryArchive(c echo.Context) error {
-	userID := c.Param("id")
 	categoryID := c.Param("categoryId")
 
-	user, err := h.store.GetUser(c.Request().Context(), userID)
+	user, err := h.resolvePathUser(c)
 	if err != nil {
-		return err
-	}
-	if user == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+		return h.handleUserAccessError(c, err)
 	}
 
 	category, err := h.store.GetCategory(c.Request().Context(), categoryID)
@@ -698,6 +737,11 @@ func (h *Handlers) ToggleCategoryArchive(c echo.Context) error {
 }
 
 func (h *Handlers) CreateTransaction(c echo.Context) error {
+	current := currentUserFromContext(c)
+	if current == nil {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+
 	var req TransactionRequest
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid payload"})
@@ -715,6 +759,9 @@ func (h *Handlers) CreateTransaction(c echo.Context) error {
 	}
 	if user == nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "user not found"})
+	}
+	if user.FamilyID != current.FamilyID {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "forbidden"})
 	}
 
 	category, err := h.store.GetCategory(c.Request().Context(), req.CategoryID)
@@ -782,13 +829,9 @@ func (h *Handlers) CreateTransaction(c echo.Context) error {
 }
 
 func (h *Handlers) ListTransactions(c echo.Context) error {
-	userID := c.Param("id")
-	user, err := h.store.GetUser(c.Request().Context(), userID)
+	user, err := h.resolvePathUser(c)
 	if err != nil {
-		return err
-	}
-	if user == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+		return h.handleUserAccessError(c, err)
 	}
 
 	startDate, err := parseOptionalTime(c.QueryParam("start_date"))
@@ -858,13 +901,9 @@ func (h *Handlers) ListTransactions(c echo.Context) error {
 }
 
 func (h *Handlers) GetReportsOverview(c echo.Context) error {
-	userID := c.Param("id")
-	user, err := h.store.GetUser(c.Request().Context(), userID)
+	user, err := h.resolvePathUser(c)
 	if err != nil {
-		return err
-	}
-	if user == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+		return h.handleUserAccessError(c, err)
 	}
 
 	startDate, err := parseOptionalTime(c.QueryParam("start_date"))
@@ -888,13 +927,9 @@ func (h *Handlers) GetReportsOverview(c echo.Context) error {
 }
 
 func (h *Handlers) CreatePlannedOperation(c echo.Context) error {
-	userID := c.Param("id")
-	user, err := h.store.GetUser(c.Request().Context(), userID)
+	user, err := h.resolvePathUser(c)
 	if err != nil {
-		return err
-	}
-	if user == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+		return h.handleUserAccessError(c, err)
 	}
 
 	var req PlannedOperationRequest
@@ -995,13 +1030,9 @@ func (h *Handlers) CreatePlannedOperation(c echo.Context) error {
 }
 
 func (h *Handlers) ListPlannedOperations(c echo.Context) error {
-	userID := c.Param("id")
-	user, err := h.store.GetUser(c.Request().Context(), userID)
+	user, err := h.resolvePathUser(c)
 	if err != nil {
-		return err
-	}
-	if user == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+		return h.handleUserAccessError(c, err)
 	}
 
 	planned, err := h.store.ListPlannedOperationsByFamily(c.Request().Context(), user.FamilyID, store.PlannedOperationStatusPending)
@@ -1017,15 +1048,11 @@ func (h *Handlers) ListPlannedOperations(c echo.Context) error {
 }
 
 func (h *Handlers) CompletePlannedOperation(c echo.Context) error {
-	userID := c.Param("id")
 	planID := c.Param("operationId")
 
-	actor, err := h.store.GetUser(c.Request().Context(), userID)
+	actor, err := h.resolvePathUser(c)
 	if err != nil {
-		return err
-	}
-	if actor == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "user not found"})
+		return h.handleUserAccessError(c, err)
 	}
 
 	plan, err := h.store.GetPlannedOperation(c.Request().Context(), planID)

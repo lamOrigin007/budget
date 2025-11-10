@@ -254,13 +254,18 @@ export interface ReportFilters {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:8080';
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+async function request<T>(url: string, init?: RequestInit, userId?: string): Promise<T> {
+  const headers: HeadersInit = {
+    'Content-Type': 'application/json',
+    ...(init?.headers ?? {})
+  };
+  if (userId) {
+    headers['X-User-ID'] = userId;
+  }
+
   const response = await fetch(`${API_BASE}${url}`, {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {})
-    }
+    headers
   });
 
   if (!response.ok) {
@@ -279,7 +284,7 @@ export async function registerUser(payload: RegisterRequest): Promise<RegisterRe
 }
 
 export async function fetchCategories(userId: string): Promise<Category[]> {
-  const data = await request<{ categories: Category[] }>(`/api/v1/users/${userId}/categories`);
+  const data = await request<{ categories: Category[] }>(`/api/v1/users/${userId}/categories`, undefined, userId);
   return data.categories;
 }
 
@@ -287,12 +292,12 @@ export async function createCategory(userId: string, payload: CategoryPayload): 
   const data = await request<{ category: Category }>(`/api/v1/users/${userId}/categories`, {
     method: 'POST',
     body: JSON.stringify(payload)
-  });
+  }, userId);
   return data.category;
 }
 
 export async function fetchAccounts(userId: string): Promise<Account[]> {
-  const data = await request<{ accounts: Account[] }>(`/api/v1/users/${userId}/accounts`);
+  const data = await request<{ accounts: Account[] }>(`/api/v1/users/${userId}/accounts`, undefined, userId);
   return data.accounts;
 }
 
@@ -300,7 +305,7 @@ export async function createAccount(userId: string, payload: AccountPayload): Pr
   const data = await request<{ account: Account }>(`/api/v1/users/${userId}/accounts`, {
     method: 'POST',
     body: JSON.stringify(payload)
-  });
+  }, userId);
   return data.account;
 }
 
@@ -308,7 +313,7 @@ export async function updateCategory(userId: string, categoryId: string, payload
   const data = await request<{ category: Category }>(`/api/v1/users/${userId}/categories/${categoryId}`, {
     method: 'PUT',
     body: JSON.stringify(payload)
-  });
+  }, userId);
   return data.category;
 }
 
@@ -320,7 +325,7 @@ export async function setCategoryArchived(
   const data = await request<{ category: Category }>(`/api/v1/users/${userId}/categories/${categoryId}/archive`, {
     method: 'POST',
     body: JSON.stringify(payload)
-  });
+  }, userId);
   return data.category;
 }
 
@@ -328,7 +333,7 @@ export async function createTransaction(payload: TransactionRequest): Promise<Tr
   const data = await request<{ transaction: Transaction }>('/api/v1/transactions', {
     method: 'POST',
     body: JSON.stringify(payload)
-  });
+  }, payload.user_id);
   return data.transaction;
 }
 
@@ -351,7 +356,7 @@ export async function fetchTransactions(userId: string, filters?: TransactionFil
   }
   const query = search.toString();
   const url = `/api/v1/users/${userId}/transactions${query ? `?${query}` : ''}`;
-  const data = await request<{ transactions: Transaction[] }>(url);
+  const data = await request<{ transactions: Transaction[] }>(url, undefined, userId);
   return data.transactions;
 }
 
@@ -368,17 +373,17 @@ export async function fetchReportsOverview(
   }
   const query = search.toString();
   const url = `/api/v1/users/${userId}/reports/overview${query ? `?${query}` : ''}`;
-  const data = await request<{ reports: ReportsOverview }>(url);
+  const data = await request<{ reports: ReportsOverview }>(url, undefined, userId);
   return data.reports;
 }
 
 export async function fetchFamilyMembers(userId: string): Promise<FamilyMember[]> {
-  const data = await request<{ members: FamilyMember[] }>(`/api/v1/users/${userId}/members`);
+  const data = await request<{ members: FamilyMember[] }>(`/api/v1/users/${userId}/members`, undefined, userId);
   return data.members;
 }
 
 export async function fetchPlannedOperations(userId: string): Promise<PlannedOperationsResponse> {
-  return request<PlannedOperationsResponse>(`/api/v1/users/${userId}/planned-operations`);
+  return request<PlannedOperationsResponse>(`/api/v1/users/${userId}/planned-operations`, undefined, userId);
 }
 
 export async function createPlannedOperation(
@@ -388,12 +393,12 @@ export async function createPlannedOperation(
   const data = await request<PlannedOperationResponse>(`/api/v1/users/${userId}/planned-operations`, {
     method: 'POST',
     body: JSON.stringify(payload)
-  });
+  }, userId);
   return data.planned_operation;
 }
 
 export async function fetchUserSettings(userId: string): Promise<UserSettingsSummary> {
-  return request<UserSettingsSummary>(`/api/v1/users/${userId}/settings`);
+  return request<UserSettingsSummary>(`/api/v1/users/${userId}/settings`, undefined, userId);
 }
 
 export async function updateUserSettings(
@@ -403,7 +408,7 @@ export async function updateUserSettings(
   return request<UserSettingsSummary>(`/api/v1/users/${userId}/settings`, {
     method: 'PUT',
     body: JSON.stringify(payload)
-  });
+  }, userId);
 }
 
 export async function completePlannedOperation(
@@ -416,6 +421,7 @@ export async function completePlannedOperation(
     {
       method: 'POST',
       body: payload ? JSON.stringify(payload) : undefined
-    }
+    },
+    userId
   );
 }

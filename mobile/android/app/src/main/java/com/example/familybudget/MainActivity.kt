@@ -42,6 +42,7 @@ import io.ktor.client.call.body
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
+import io.ktor.client.request.headers
 import io.ktor.client.request.post
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
@@ -202,7 +203,11 @@ fun BudgetScreen(client: HttpClient) {
     fun loadCategories(userId: String) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val list: CategoryList = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/categories").body()
+                val list: CategoryList = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/categories") {
+                    headers {
+                        append("X-User-ID", userId)
+                    }
+                }.body()
                 withContext(Dispatchers.Main) {
                     categories = list.categories.sortedWith(compareBy({ it.isArchived }, { it.name }))
                     plannedCategoryId = categories.firstOrNull { !it.isArchived && it.type == plannedType }?.id
@@ -218,7 +223,11 @@ fun BudgetScreen(client: HttpClient) {
     fun loadAccounts(userId: String) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val list: AccountList = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/accounts").body()
+                val list: AccountList = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/accounts") {
+                    headers {
+                        append("X-User-ID", userId)
+                    }
+                }.body()
                 withContext(Dispatchers.Main) {
                     accounts = list.accounts.sortedBy { it.name }
                     plannedAccountId = accounts.firstOrNull()?.id
@@ -238,7 +247,11 @@ fun BudgetScreen(client: HttpClient) {
                 membersMessage = ""
             }
             try {
-                val list: MemberList = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/members").body()
+                val list: MemberList = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/members") {
+                    headers {
+                        append("X-User-ID", userId)
+                    }
+                }.body()
                 withContext(Dispatchers.Main) {
                     familyMembers = list.members.sortedBy { it.name }
                     isMembersLoading = false
@@ -264,6 +277,9 @@ fun BudgetScreen(client: HttpClient) {
             }
             try {
                 val response: TransactionList = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/transactions") {
+                    headers {
+                        append("X-User-ID", userId)
+                    }
                     if (!memberId.isNullOrBlank()) {
                         url.parameters.append("user_id", memberId)
                     }
@@ -331,6 +347,9 @@ fun BudgetScreen(client: HttpClient) {
             }
             try {
                 val response: ReportsOverviewResponse = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/reports/overview") {
+                    headers {
+                        append("X-User-ID", userId)
+                    }
                     if (!startIso.isNullOrBlank()) {
                         url.parameters.append("start_date", startIso)
                     }
@@ -359,7 +378,11 @@ fun BudgetScreen(client: HttpClient) {
                 settingsMessage = ""
             }
             try {
-                val response: UserSettingsSummary = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/settings").body()
+                val response: UserSettingsSummary = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/settings") {
+                    headers {
+                        append("X-User-ID", userId)
+                    }
+                }.body()
                 withContext(Dispatchers.Main) {
                     settingsSummary = response
                     supportedCurrencies = response.supportedCurrencies.sorted()
@@ -414,6 +437,9 @@ fun BudgetScreen(client: HttpClient) {
                     )
                 )
                 val response: UserSettingsSummary = client.put("http://10.0.2.2:8080/api/v1/users/${'$'}{currentUser.id}/settings") {
+                    headers {
+                        append("X-User-ID", currentUser.id)
+                    }
                     setBody(payload)
                 }.body()
                 withContext(Dispatchers.Main) {
@@ -458,7 +484,11 @@ fun BudgetScreen(client: HttpClient) {
                 plannedMessage = ""
             }
             try {
-                val response: PlannedOperationsList = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/planned-operations").body()
+                val response: PlannedOperationsList = client.get("http://10.0.2.2:8080/api/v1/users/${'$'}userId/planned-operations") {
+                    headers {
+                        append("X-User-ID", userId)
+                    }
+                }.body()
                 withContext(Dispatchers.Main) {
                     plannedOperations = response.planned.sortedBy { it.dueAt }
                     completedPlannedOperations = response.completed.sortedByDescending { it.lastCompletedAt ?: it.updatedAt }
@@ -518,6 +548,9 @@ fun BudgetScreen(client: HttpClient) {
             }
             try {
                 val response: PlannedOperationResponse = client.post("http://10.0.2.2:8080/api/v1/users/${'$'}{currentUser.id}/planned-operations") {
+                    headers {
+                        append("X-User-ID", currentUser.id)
+                    }
                     setBody(payload)
                 }.body()
                 withContext(Dispatchers.Main) {
@@ -548,7 +581,11 @@ fun BudgetScreen(client: HttpClient) {
             try {
                 val response: PlannedOperationCompleteResponse = client.post(
                     "http://10.0.2.2:8080/api/v1/users/${'$'}{currentUser.id}/planned-operations/${'$'}{plan.id}/complete"
-                ) {}.body()
+                ) {
+                    headers {
+                        append("X-User-ID", currentUser.id)
+                    }
+                }.body()
                 withContext(Dispatchers.Main) {
                     completingPlanId = null
                     val updated = response.plannedOperation
@@ -595,10 +632,16 @@ fun BudgetScreen(client: HttpClient) {
             try {
                 val response: CategoryResponse = if (editingCategoryId == null) {
                     client.post("http://10.0.2.2:8080/api/v1/users/${'$'}{currentUser.id}/categories") {
+                        headers {
+                            append("X-User-ID", currentUser.id)
+                        }
                         setBody(payload)
                     }.body()
                 } else {
                     client.put("http://10.0.2.2:8080/api/v1/users/${'$'}{currentUser.id}/categories/${'$'}editingCategoryId") {
+                        headers {
+                            append("X-User-ID", currentUser.id)
+                        }
                         setBody(payload)
                     }.body()
                 }
@@ -642,6 +685,9 @@ fun BudgetScreen(client: HttpClient) {
             )
             try {
                 val response: AccountResponse = client.post("http://10.0.2.2:8080/api/v1/users/${'$'}{currentUser.id}/accounts") {
+                    headers {
+                        append("X-User-ID", currentUser.id)
+                    }
                     setBody(payload)
                 }.body()
                 withContext(Dispatchers.Main) {
@@ -673,6 +719,9 @@ fun BudgetScreen(client: HttpClient) {
             isCategoryLoading = true
             try {
                 val response: CategoryResponse = client.post("http://10.0.2.2:8080/api/v1/users/${'$'}{currentUser.id}/categories/${'$'}{category.id}/archive") {
+                    headers {
+                        append("X-User-ID", currentUser.id)
+                    }
                     setBody(CategoryArchiveRequest(archived = archived))
                 }.body()
                 withContext(Dispatchers.Main) {
@@ -749,6 +798,11 @@ fun BudgetScreen(client: HttpClient) {
                         placeholder = { Text("Оставьте пустым, чтобы создать новую") },
                         modifier = Modifier.fillMaxWidth()
                     )
+                    Text(
+                        text = "После входа будут доступны только данные выбранной семьи.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
                     Button(
                         onClick = { register() },
                         enabled = email.isNotBlank() && password.isNotBlank() && name.isNotBlank()
@@ -759,6 +813,14 @@ fun BudgetScreen(client: HttpClient) {
             }
             if (user != null) {
                 Spacer(modifier = Modifier.height(16.dp))
+                family?.let { currentFamily ->
+                    Text(
+                        text = "Вы работаете только с данными семьи \"${'$'}{currentFamily.name}\" (ID ${'$'}{currentFamily.id}).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
                 SettingsSection(
                     user = user,
                     supportedCurrencies = supportedCurrencies,
