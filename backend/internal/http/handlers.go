@@ -28,6 +28,22 @@ var (
 	errFamilyMismatch = errors.New("family mismatch")
 )
 
+type accessScope struct {
+	Mode       string `json:"mode"`
+	FamilyID   string `json:"family_id"`
+	FamilyName string `json:"family_name"`
+	Message    string `json:"message"`
+}
+
+func buildFamilyScope(family *domain.Family) accessScope {
+	return accessScope{
+		Mode:       "family",
+		FamilyID:   family.ID,
+		FamilyName: family.Name,
+		Message:    fmt.Sprintf("Вы видите только данные семьи \"%s\" (ID %s).", family.Name, family.ID),
+	}
+}
+
 var supportedCurrencies = []string{"RUB", "USD", "EUR", "KZT", "BYN", "UAH", "GBP"}
 
 const currentUserContextKey = "currentUser"
@@ -48,6 +64,7 @@ type RegisterResponse struct {
 	Categories []domain.Category     `json:"categories"`
 	Accounts   []domain.Account      `json:"accounts"`
 	Members    []domain.FamilyMember `json:"members"`
+	Scope      accessScope           `json:"scope"`
 }
 
 type DisplaySettingsPayload struct {
@@ -173,6 +190,7 @@ func (h *Handlers) RequireAuth(next echo.HandlerFunc) echo.HandlerFunc {
 		}
 
 		c.Set(currentUserContextKey, user)
+		c.Response().Header().Set("X-Family-ID", user.FamilyID)
 		return next(c)
 	}
 }
@@ -310,7 +328,9 @@ func (h *Handlers) RegisterUser(c echo.Context) error {
 		return err
 	}
 
-	return c.JSON(http.StatusCreated, RegisterResponse{User: *user, Family: *family, Categories: categories, Accounts: accounts, Members: members})
+	scope := buildFamilyScope(family)
+
+	return c.JSON(http.StatusCreated, RegisterResponse{User: *user, Family: *family, Categories: categories, Accounts: accounts, Members: members, Scope: scope})
 }
 
 func defaultLocale(locale string) string {
@@ -334,6 +354,23 @@ func (h *Handlers) GetUser(c echo.Context) error {
 		"user":   user,
 		"family": family,
 	})
+}
+
+func (h *Handlers) GetAccessScope(c echo.Context) error {
+	current := currentUserFromContext(c)
+	if current == nil {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+
+	family, err := h.store.GetFamily(c.Request().Context(), current.FamilyID)
+	if err != nil {
+		return err
+	}
+	if family == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "family not found"})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{"scope": buildFamilyScope(family)})
 }
 
 func (h *Handlers) GetUserSettings(c echo.Context) error {

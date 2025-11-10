@@ -45,6 +45,23 @@ paths:
           description: Invalid request
         '409':
           description: User already exists
+  /api/v1/access/scope:
+    get:
+      summary: Получить область доступа текущего пользователя
+      responses:
+        '200':
+          description: Scope information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scope:
+                    $ref: '#/components/schemas/AccessScope'
+        '401':
+          description: Unauthorized
+        '404':
+          description: Family not found
   /api/v1/users/{id}:
     get:
       summary: Get user by id
@@ -525,6 +542,12 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Account'
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/FamilyMember'
+        scope:
+          $ref: '#/components/schemas/AccessScope'
     User:
       type: object
       properties:
@@ -627,6 +650,31 @@ components:
         created_at:
           type: string
           format: date-time
+    FamilyMember:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+      required: [id, name, email, role]
+    AccessScope:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [family]
+        family_id:
+          type: string
+        family_name:
+          type: string
+        message:
+          type: string
+      required: [mode, family_id, family_name, message]
     Category:
       type: object
       properties:

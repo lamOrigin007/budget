@@ -39,6 +39,7 @@ import {
   Category,
   CategoryPayload,
   DisplaySettings,
+  AccessScope,
   FamilyMember,
   PlannedOperation,
   PlannedOperationPayload,
@@ -59,6 +60,7 @@ import {
   setCategoryArchived,
   createAccount,
   fetchFamilyMembers,
+  fetchAccessScope,
   fetchPlannedOperations,
   createPlannedOperation,
   completePlannedOperation,
@@ -95,6 +97,9 @@ export default function Home() {
   const [step, setStep] = useState<Step>('register');
   const [registerError, setRegisterError] = useState<string | null>(null);
   const [userData, setUserData] = useState<RegisterResponse | null>(null);
+  const [accessScope, setAccessScope] = useState<AccessScope | null>(null);
+  const [isScopeLoading, setIsScopeLoading] = useState(false);
+  const [scopeError, setScopeError] = useState<string | null>(null);
   const [settingsSummary, setSettingsSummary] = useState<UserSettingsSummary | null>(null);
   const [isSettingsLoading, setIsSettingsLoading] = useState(false);
   const [isSettingsSaving, setIsSettingsSaving] = useState(false);
@@ -319,18 +324,19 @@ export default function Home() {
     }
     void refreshMembers(userData.user.id);
     void refreshPlannedOperationsList(userData.user.id);
-  }, [refreshMembers, refreshPlannedOperationsList, userData?.user.id]);
+  }, [refreshMembers, refreshPlannedOperationsList, userData, userData?.user.id]);
 
   useEffect(() => {
     if (!userData) {
       return;
     }
     void loadSettingsSummary(userData.user.id);
-  }, [userData?.user.id]);
+    void loadAccessScope(userData.user.id);
+  }, [loadAccessScope, loadSettingsSummary, userData, userData?.user.id]);
 
-  function sortAccounts(list: Account[]) {
+  const sortAccounts = useCallback((list: Account[]) => {
     return [...list].sort((left, right) => left.name.localeCompare(right.name, 'ru'));
-  }
+  }, []);
 
   function formatMoney(valueMinor: number, currency: string) {
     const value = valueMinor / 100;
@@ -466,7 +472,7 @@ export default function Home() {
     []
   );
 
-  async function loadSettingsSummary(userId: string) {
+  const loadSettingsSummary = useCallback(async (userId: string) => {
     setIsSettingsLoading(true);
     setSettingsError(null);
     setSettingsSuccess(null);
@@ -520,7 +526,20 @@ export default function Home() {
     } finally {
       setIsSettingsLoading(false);
     }
-  }
+  }, [sortAccounts, sortCategories]);
+
+  const loadAccessScope = useCallback(async (userId: string) => {
+    setIsScopeLoading(true);
+    setScopeError(null);
+    try {
+      const scope = await fetchAccessScope(userId);
+      setAccessScope(scope);
+    } catch (error) {
+      setScopeError(error instanceof Error ? error.message : 'Не удалось определить область доступа');
+    } finally {
+      setIsScopeLoading(false);
+    }
+  }, []);
 
   async function refreshAccounts(userId: string, preferredAccountId?: string) {
     const list = sortAccounts(await fetchAccounts(userId));
@@ -667,6 +686,9 @@ export default function Home() {
         family_id: String(formData.get('family_id') ?? '')
       });
       setUserData(response);
+      setAccessScope(response.scope);
+      setScopeError(null);
+      setIsScopeLoading(false);
       setSettingsForm({
         family_currency: response.family.currency_base,
         user_currency: response.user.currency_default,
@@ -936,14 +958,14 @@ export default function Home() {
     setEditingCategoryId(null);
   }
 
-  function sortCategories(list: Category[]) {
+  const sortCategories = useCallback((list: Category[]) => {
     return [...list].sort((a, b) => {
       if (a.is_archived !== b.is_archived) {
         return a.is_archived ? 1 : -1;
       }
       return a.name.localeCompare(b.name, 'ru');
     });
-  }
+  }, []);
 
   async function handleCategorySubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1121,9 +1143,16 @@ export default function Home() {
             <div style={{ fontSize: '0.75rem' }}>{userData?.user.email}</div>
           </div>
         </div>
-        <p className="meta" style={{ marginTop: '0.5rem' }}>
-          Все данные на панели относятся только к семье «{userData?.family.name}» (ID {userData?.family.id}).
-        </p>
+        <div style={{ marginTop: '0.5rem' }}>
+          {isScopeLoading && <p className="meta">Определяем область доступа...</p>}
+          {scopeError && <p className="error">{scopeError}</p>}
+          {!isScopeLoading && !scopeError && (
+            <p className="meta">
+              {accessScope?.message ??
+                `Все данные на панели относятся только к семье «${userData?.family.name}» (ID ${userData?.family.id}).`}
+            </p>
+          )}
+        </div>
         <p className="highlight">
           Активные статьи бюджета: {activeCategories.map((category) => category.name).join(', ') || 'добавьте первую категорию'}
         </p>
