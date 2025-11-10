@@ -159,6 +159,8 @@ struct ContentView: View {
                 .textContentType(.oneTimeCode)
             Text("Оставьте поле пустым, чтобы создать новую семью", style: .footnote)
                 .foregroundColor(.secondary)
+            Text("После входа вы будете видеть только данные выбранной семьи", style: .footnote)
+                .foregroundColor(.secondary)
             Button(action: register) {
                 HStack {
                     if isLoading {
@@ -186,6 +188,10 @@ struct ContentView: View {
                         if let currency = family?.currencyBase {
                             Text("Валюта семьи: \(currency)")
                                 .font(.footnote)
+                                .foregroundColor(.secondary)
+                        }
+                        if let family = family {
+                            Text("Доступ ограничен семьёй \(family.name) (ID \(family.id))", style: .footnote)
                                 .foregroundColor(.secondary)
                         }
                     }
@@ -220,6 +226,8 @@ struct ContentView: View {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(user.id, forHTTPHeaderField: "X-User-ID")
+        request.setValue(userId, forHTTPHeaderField: "X-User-ID")
 
         let payload = RegisterRequest(
             email: email,
@@ -300,7 +308,9 @@ struct ContentView: View {
 
     private func loadCategories(userId: String) {
         guard let url = URL(string: "http://localhost:8080/api/v1/users/\(userId)/categories") else { return }
-        URLSession.shared.dataTask(with: url) { data, _, _ in
+        var request = URLRequest(url: url)
+        request.setValue(userId, forHTTPHeaderField: "X-User-ID")
+        URLSession.shared.dataTask(with: request) { data, _, _ in
             guard
                 let data = data,
                 let response = try? JSONDecoder().decode(CategoryList.self, from: data)
@@ -322,7 +332,9 @@ struct ContentView: View {
 
     private func loadAccounts(userId: String) {
         guard let url = URL(string: "http://localhost:8080/api/v1/users/\(userId)/accounts") else { return }
-        URLSession.shared.dataTask(with: url) { data, _, _ in
+        var request = URLRequest(url: url)
+        request.setValue(userId, forHTTPHeaderField: "X-User-ID")
+        URLSession.shared.dataTask(with: request) { data, _, _ in
             guard
                 let data = data,
                 let response = try? JSONDecoder().decode(AccountList.self, from: data)
@@ -343,7 +355,9 @@ struct ContentView: View {
             isMembersLoading = true
             membersMessage = ""
         }
-        URLSession.shared.dataTask(with: url) { data, _, error in
+        var request = URLRequest(url: url)
+        request.setValue(userId, forHTTPHeaderField: "X-User-ID")
+        URLSession.shared.dataTask(with: request) { data, _, error in
             DispatchQueue.main.async {
                 isMembersLoading = false
             }
@@ -375,11 +389,13 @@ struct ContentView: View {
 
     private func loadSettings(userId: String) {
         guard let url = URL(string: "http://localhost:8080/api/v1/users/\(userId)/settings") else { return }
+        var request = URLRequest(url: url)
+        request.setValue(userId, forHTTPHeaderField: "X-User-ID")
         DispatchQueue.main.async {
             isSettingsLoading = true
             settingsMessage = ""
         }
-        URLSession.shared.dataTask(with: url) { data, _, error in
+        URLSession.shared.dataTask(with: request) { data, _, error in
             DispatchQueue.main.async {
                 isSettingsLoading = false
             }
@@ -407,6 +423,7 @@ struct ContentView: View {
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(user.id, forHTTPHeaderField: "X-User-ID")
 
         let payload = UpdateUserSettingsPayload(
             familyCurrency: user.role == "owner" ? familyCurrencySetting.uppercased() : nil,
@@ -679,6 +696,7 @@ struct ContentView: View {
         var request = URLRequest(url: url)
         request.httpMethod = isEditing ? "PUT" : "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(userId, forHTTPHeaderField: "X-User-ID")
 
         let payload = CategoryPayload(
             name: categoryName,
@@ -733,6 +751,7 @@ struct ContentView: View {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(userId, forHTTPHeaderField: "X-User-ID")
         request.httpBody = try? JSONEncoder().encode(CategoryArchiveRequest(archived: archived))
 
         URLSession.shared.dataTask(with: request) { data, _, error in
@@ -877,7 +896,9 @@ struct ContentView: View {
             return
         }
 
-        URLSession.shared.dataTask(with: url) { data, _, error in
+        var request = URLRequest(url: url)
+        request.setValue(user.id, forHTTPHeaderField: "X-User-ID")
+        URLSession.shared.dataTask(with: request) { data, _, error in
             DispatchQueue.main.async {
                 isLoadingTransactions = false
             }
@@ -933,7 +954,9 @@ struct ContentView: View {
             reportsMessage = ""
         }
 
-        URLSession.shared.dataTask(with: url) { data, _, error in
+        var request = URLRequest(url: url)
+        request.setValue(user.id, forHTTPHeaderField: "X-User-ID")
+        URLSession.shared.dataTask(with: request) { data, _, error in
             DispatchQueue.main.async {
                 isReportsLoading = false
             }
@@ -1098,7 +1121,9 @@ struct ContentView: View {
             isPlannedLoading = true
             plannedMessage = ""
         }
-        URLSession.shared.dataTask(with: url) { data, _, error in
+        var request = URLRequest(url: url)
+        request.setValue(userId, forHTTPHeaderField: "X-User-ID")
+        URLSession.shared.dataTask(with: request) { data, _, error in
             DispatchQueue.main.async {
                 isPlannedLoading = false
             }
@@ -1164,6 +1189,7 @@ struct ContentView: View {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(user.id, forHTTPHeaderField: "X-User-ID")
         request.httpBody = try? JSONEncoder().encode(payload)
 
         plannedMessage = ""
@@ -1205,6 +1231,7 @@ struct ContentView: View {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(user.id, forHTTPHeaderField: "X-User-ID")
 
         completingPlanId = plan.id
         plannedMessage = ""

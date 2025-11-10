@@ -1057,6 +1057,9 @@ export default function Home() {
           <p className="subtitle">
             Зарегистрируйте владельца семьи, чтобы начать вести общий бюджет. Все операции будут привязаны к созданному пользователю.
           </p>
+          <p className="meta" style={{ marginBottom: '1.5rem' }}>
+            После регистрации интерфейс и отчёты показывают только данные выбранной семьи.
+          </p>
           <form onSubmit={handleRegister} className="form-grid">
             <div className="input-group">
               <label htmlFor="name">Имя</label>
@@ -1118,6 +1121,9 @@ export default function Home() {
             <div style={{ fontSize: '0.75rem' }}>{userData?.user.email}</div>
           </div>
         </div>
+        <p className="meta" style={{ marginTop: '0.5rem' }}>
+          Все данные на панели относятся только к семье «{userData?.family.name}» (ID {userData?.family.id}).
+        </p>
         <p className="highlight">
           Активные статьи бюджета: {activeCategories.map((category) => category.name).join(', ') || 'добавьте первую категорию'}
         </p>
