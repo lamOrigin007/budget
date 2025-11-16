@@ -209,6 +209,11 @@ export default function Home() {
     () => (showArchivedCategories ? categories : activeCategories),
     [showArchivedCategories, categories, activeCategories]
   );
+  const canManageReferenceData = Boolean(
+    userData && (userData.user.role === 'owner' || userData.user.role === 'adult')
+  );
+  const directoryPermissionHint =
+    'Управлять счетами и категориями могут только владелец семьи и взрослые участники. Остальные участники видят справочники в режиме чтения.';
   const currencyOptions = useMemo(() => {
     const set = new Set<string>(settingsSummary?.supported_currencies ?? ['RUB', 'USD', 'EUR']);
     if (settingsSummary?.family.currency_base) {
@@ -970,6 +975,10 @@ export default function Home() {
   async function handleCategorySubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!userData) return;
+    if (!canManageReferenceData) {
+      setCategoryError(directoryPermissionHint);
+      return;
+    }
     setCategoryError(null);
     setIsCategorySubmitting(true);
     const payload: CategoryPayload = {
@@ -1004,6 +1013,10 @@ export default function Home() {
   async function handleAccountSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!userData) return;
+    if (!canManageReferenceData) {
+      setAccountError(directoryPermissionHint);
+      return;
+    }
     setAccountError(null);
     setIsAccountSubmitting(true);
 
@@ -1040,6 +1053,10 @@ export default function Home() {
   }
 
   function handleCategoryEdit(category: Category) {
+    if (!canManageReferenceData) {
+      setCategoryError(directoryPermissionHint);
+      return;
+    }
     setEditingCategoryId(category.id);
     setCategoryForm({
       name: category.name,
@@ -1052,6 +1069,10 @@ export default function Home() {
 
   async function handleCategoryArchive(category: Category, archived: boolean) {
     if (!userData) return;
+    if (!canManageReferenceData) {
+      setCategoryError(directoryPermissionHint);
+      return;
+    }
     setCategoryError(null);
     setIsCategorySubmitting(true);
     try {
@@ -1347,6 +1368,11 @@ export default function Home() {
 
       <section className="panel">
         <h2>Счета и кошельки</h2>
+        {!canManageReferenceData && (
+          <p className="meta" style={{ marginBottom: '0.75rem' }}>
+            {directoryPermissionHint}
+          </p>
+        )}
         <div
           className="form-grid"
           style={{ gridTemplateColumns: 'minmax(260px, 2fr) minmax(240px, 1fr)', gap: '1.5rem', alignItems: 'flex-start' }}
@@ -1389,6 +1415,7 @@ export default function Home() {
                 onChange={(event) => setAccountForm((prev) => ({ ...prev, name: event.target.value }))}
                 placeholder="Например, Наличные"
                 required
+                disabled={!canManageReferenceData}
               />
             </div>
             <div className="input-group">
@@ -1401,6 +1428,7 @@ export default function Home() {
                 onChange={(event) =>
                   setAccountForm((prev) => ({ ...prev, type: event.target.value as Account['type'] }))
                 }
+                disabled={!canManageReferenceData}
               >
                 <option value="cash">Наличные</option>
                 <option value="card">Карта</option>
@@ -1418,6 +1446,7 @@ export default function Home() {
                 value={accountForm.currency}
                 onChange={(event) => setAccountForm((prev) => ({ ...prev, currency: event.target.value }))}
                 placeholder={userData?.user.currency_default ?? 'RUB'}
+                disabled={!canManageReferenceData}
               />
             </div>
             <div className="input-group">
@@ -1430,6 +1459,7 @@ export default function Home() {
                 value={accountForm.initial_balance_minor}
                 onChange={(event) => setAccountForm((prev) => ({ ...prev, initial_balance_minor: event.target.value }))}
                 placeholder="0"
+                disabled={!canManageReferenceData}
               />
             </div>
             <div className="input-group" style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
@@ -1440,13 +1470,19 @@ export default function Home() {
                   type="checkbox"
                   checked={accountForm.shared}
                   onChange={(event) => setAccountForm((prev) => ({ ...prev, shared: event.target.checked }))}
+                  disabled={!canManageReferenceData}
                 />
                 Общий счёт семьи
               </label>
               <span className="meta">Снимите флажок, чтобы сделать счёт личным.</span>
             </div>
             {accountError && <p className="error" style={{ gridColumn: '1 / -1' }}>{accountError}</p>}
-            <button type="submit" className="button" disabled={isAccountSubmitting} style={{ gridColumn: '1 / -1' }}>
+            <button
+              type="submit"
+              className="button"
+              disabled={isAccountSubmitting || !canManageReferenceData}
+              style={{ gridColumn: '1 / -1' }}
+            >
               {isAccountSubmitting ? 'Сохранение...' : 'Добавить счёт'}
             </button>
           </form>
@@ -1644,6 +1680,11 @@ export default function Home() {
       <div className="dashboard-columns">
         <article className="panel">
           <h2>{editingCategoryId ? 'Редактирование категории' : 'Новая категория'}</h2>
+          {!canManageReferenceData && (
+            <p className="meta" style={{ marginBottom: '0.75rem' }}>
+              {directoryPermissionHint}
+            </p>
+          )}
           <form onSubmit={handleCategorySubmit} className="form-grid">
             <div className="input-group">
               <label htmlFor="category_name">Название статьи</label>
@@ -1654,6 +1695,7 @@ export default function Home() {
                 value={categoryForm.name}
                 onChange={(event) => setCategoryForm((prev) => ({ ...prev, name: event.target.value }))}
                 required
+                disabled={!canManageReferenceData}
               />
             </div>
             <div className="input-group">
@@ -1666,6 +1708,7 @@ export default function Home() {
                 onChange={(event) =>
                   setCategoryForm((prev) => ({ ...prev, type: event.target.value as CategoryPayload['type'] }))
                 }
+                disabled={!canManageReferenceData}
               >
                 <option value="expense">Расход</option>
                 <option value="income">Доход</option>
@@ -1681,6 +1724,7 @@ export default function Home() {
                 value={categoryForm.color}
                 onChange={(event) => setCategoryForm((prev) => ({ ...prev, color: event.target.value }))}
                 placeholder="#0ea5e9"
+                disabled={!canManageReferenceData}
               />
             </div>
             <div className="input-group">
@@ -1691,6 +1735,7 @@ export default function Home() {
                 className="select"
                 value={categoryForm.parent_id}
                 onChange={(event) => setCategoryForm((prev) => ({ ...prev, parent_id: event.target.value }))}
+                disabled={!canManageReferenceData}
               >
                 <option value="">Без родителя</option>
                 {availableParents.map((category) => (
@@ -1710,15 +1755,25 @@ export default function Home() {
                 value={categoryForm.description}
                 onChange={(event) => setCategoryForm((prev) => ({ ...prev, description: event.target.value }))}
                 placeholder="Например: регулярные траты на обучение или спортивные секции"
+                disabled={!canManageReferenceData}
               />
             </div>
             {categoryError && <p className="error">{categoryError}</p>}
             <div style={{ display: 'flex', gap: '0.75rem' }}>
-              <button type="submit" className="button" disabled={isCategorySubmitting}>
+              <button
+                type="submit"
+                className="button"
+                disabled={isCategorySubmitting || !canManageReferenceData}
+              >
                 {isCategorySubmitting ? 'Сохранение...' : editingCategoryId ? 'Сохранить изменения' : 'Создать категорию'}
               </button>
               {editingCategoryId && (
-                <button type="button" className="button" onClick={resetCategoryForm} disabled={isCategorySubmitting}>
+                <button
+                  type="button"
+                  className="button"
+                  onClick={resetCategoryForm}
+                  disabled={isCategorySubmitting || !canManageReferenceData}
+                >
                   Отмена
                 </button>
               )}
@@ -2185,6 +2240,11 @@ export default function Home() {
 
       <section className="panel">
         <h2>Справочник категорий</h2>
+        {!canManageReferenceData && (
+          <p className="meta" style={{ marginBottom: '0.75rem' }}>
+            {directoryPermissionHint}
+          </p>
+        )}
         {categories.length === 0 && <p className="highlight">Добавьте первую статью движения средств для семьи.</p>}
         {activeCategories.length > 0 && (
           <div style={{ marginBottom: '1.5rem' }}>
@@ -2198,14 +2258,18 @@ export default function Home() {
                     {category.description && <p className="highlight">{category.description}</p>}
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                    <button className="button" onClick={() => handleCategoryEdit(category)} disabled={isCategorySubmitting}>
+                    <button
+                      className="button"
+                      onClick={() => handleCategoryEdit(category)}
+                      disabled={isCategorySubmitting || !canManageReferenceData}
+                    >
                       Изменить
                     </button>
                     {!category.is_system && (
                       <button
                         className="button"
                         onClick={() => handleCategoryArchive(category, true)}
-                        disabled={isCategorySubmitting}
+                        disabled={isCategorySubmitting || !canManageReferenceData}
                       >
                         Архивировать
                       </button>
@@ -2231,7 +2295,7 @@ export default function Home() {
                     <button
                       className="button"
                       onClick={() => handleCategoryArchive(category, false)}
-                      disabled={isCategorySubmitting}
+                      disabled={isCategorySubmitting || !canManageReferenceData}
                     >
                       Вернуть в работу
                     </button>

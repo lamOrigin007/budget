@@ -61,6 +61,8 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
+private const val DIRECTORY_PERMISSION_HINT = "Управлять справочниками могут только владелец семьи и взрослые участники. Остальные участники видят их в режиме чтения."
+
 class MainActivity : ComponentActivity() {
     private val client = HttpClient(OkHttp) {
         install(ContentNegotiation) {
@@ -150,6 +152,9 @@ fun BudgetScreen(client: HttpClient) {
     var densitySetting by remember { mutableStateOf("comfortable") }
     var showArchivedSetting by remember { mutableStateOf(false) }
     var showTotalsInFamilyCurrency by remember { mutableStateOf(true) }
+
+    val canManageDirectories = user?.role == "owner" || user?.role == "adult"
+    val directoryPermissionMessage = DIRECTORY_PERMISSION_HINT
 
     LaunchedEffect(user?.id) {
         val id = user?.id ?: return@LaunchedEffect
@@ -659,6 +664,10 @@ fun BudgetScreen(client: HttpClient) {
             categoryMessage = "Укажите название категории"
             return
         }
+        if (!canManageDirectories) {
+            categoryMessage = directoryPermissionMessage
+            return
+        }
         CoroutineScope(Dispatchers.IO).launch {
             isCategoryLoading = true
             val payload = CategoryPayload(
@@ -711,6 +720,10 @@ fun BudgetScreen(client: HttpClient) {
             accountMessage = "Укажите название счёта"
             return
         }
+        if (!canManageDirectories) {
+            accountMessage = directoryPermissionMessage
+            return
+        }
         CoroutineScope(Dispatchers.IO).launch {
             isAccountLoading = true
             val initialMinor = accountInitial.toLongOrNull()
@@ -754,6 +767,10 @@ fun BudgetScreen(client: HttpClient) {
 
     fun archiveCategory(category: Category, archived: Boolean) {
         val currentUser = user ?: return
+        if (!canManageDirectories) {
+            categoryMessage = directoryPermissionMessage
+            return
+        }
         CoroutineScope(Dispatchers.IO).launch {
             isCategoryLoading = true
             try {
@@ -919,6 +936,8 @@ fun BudgetScreen(client: HttpClient) {
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 AccountsManager(
+                    canManageDirectories = canManageDirectories,
+                    directoryPermissionMessage = directoryPermissionMessage,
                     accounts = accounts,
                     accountName = accountName,
                     accountType = accountType,
@@ -998,6 +1017,8 @@ fun BudgetScreen(client: HttpClient) {
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 CategoryManager(
+                    canManageDirectories = canManageDirectories,
+                    directoryPermissionMessage = directoryPermissionMessage,
                     categories = categories,
                     categoryName = categoryName,
                     categoryType = categoryType,
@@ -1628,6 +1649,8 @@ private fun PlannedOperationsSection(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CategoryManager(
+    canManageDirectories: Boolean,
+    directoryPermissionMessage: String,
     categories: List<Category>,
     categoryName: String,
     categoryType: String,
@@ -1660,17 +1683,25 @@ private fun CategoryManager(
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
+            if (!canManageDirectories) {
+                Text(
+                    directoryPermissionMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.secondary
+                )
+            }
             OutlinedTextField(
                 value = categoryName,
                 onValueChange = onNameChange,
                 label = { Text("Название") },
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                enabled = canManageDirectories
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf("expense" to "Расход", "income" to "Доход", "transfer" to "Перевод").forEach { (value, label) ->
                     OutlinedButton(
                         onClick = { onTypeChange(value) },
-                        enabled = categoryType != value
+                        enabled = canManageDirectories && categoryType != value
                     ) {
                         Text(label)
                     }
@@ -1680,16 +1711,21 @@ private fun CategoryManager(
                 value = categoryColor,
                 onValueChange = onColorChange,
                 label = { Text("Цвет") },
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                enabled = canManageDirectories
             )
             OutlinedTextField(
                 value = categoryDescription,
                 onValueChange = onDescriptionChange,
                 label = { Text("Описание") },
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                enabled = canManageDirectories
             )
             Box {
-                OutlinedButton(onClick = { parentMenuExpanded = true }, enabled = active.isNotEmpty()) {
+                OutlinedButton(
+                    onClick = { parentMenuExpanded = true },
+                    enabled = canManageDirectories && active.isNotEmpty()
+                ) {
                     Text("Родительская категория: ${'$'}parentLabel")
                 }
                 androidx.compose.material3.DropdownMenu(
@@ -1715,11 +1751,14 @@ private fun CategoryManager(
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(onClick = onSubmit, enabled = !isLoading && categoryName.isNotBlank()) {
+                Button(
+                    onClick = onSubmit,
+                    enabled = canManageDirectories && !isLoading && categoryName.isNotBlank()
+                ) {
                     Text(if (editingCategoryId == null) "Создать" else "Сохранить")
                 }
                 if (editingCategoryId != null) {
-                    OutlinedButton(onClick = onReset, enabled = !isLoading) {
+                    OutlinedButton(onClick = onReset, enabled = canManageDirectories && !isLoading) {
                         Text("Отмена")
                     }
                 }
@@ -1732,7 +1771,14 @@ private fun CategoryManager(
                 Text("Активные категории", style = MaterialTheme.typography.titleSmall)
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(active) { category ->
-                        CategoryRow(category = category, isLoading = isLoading, onEdit = onEdit, onArchive = onArchive, archived = false)
+                        CategoryRow(
+                            category = category,
+                            isLoading = isLoading,
+                            onEdit = onEdit,
+                            onArchive = onArchive,
+                            archived = false,
+                            canManageDirectories = canManageDirectories
+                        )
                     }
                 }
             }
@@ -1740,7 +1786,14 @@ private fun CategoryManager(
                 Text("Архив", style = MaterialTheme.typography.titleSmall)
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(archived) { category ->
-                        CategoryRow(category = category, isLoading = isLoading, onEdit = onEdit, onArchive = onArchive, archived = true)
+                        CategoryRow(
+                            category = category,
+                            isLoading = isLoading,
+                            onEdit = onEdit,
+                            onArchive = onArchive,
+                            archived = true,
+                            canManageDirectories = canManageDirectories
+                        )
                     }
                 }
             }
@@ -1754,7 +1807,8 @@ private fun CategoryRow(
     isLoading: Boolean,
     onEdit: (Category) -> Unit,
     onArchive: (Category, Boolean) -> Unit,
-    archived: Boolean
+    archived: Boolean,
+    canManageDirectories: Boolean
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1771,14 +1825,14 @@ private fun CategoryRow(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (!archived) {
-                    Button(onClick = { onEdit(category) }, enabled = !isLoading) {
+                    Button(onClick = { onEdit(category) }, enabled = canManageDirectories && !isLoading) {
                         Text("Изменить")
                     }
                 }
                 if (!category.isSystem) {
                     Button(
                         onClick = { onArchive(category, !archived) },
-                        enabled = !isLoading
+                        enabled = canManageDirectories && !isLoading
                     ) {
                         Text(if (archived) "Вернуть" else "Архивировать")
                     }
@@ -1791,6 +1845,8 @@ private fun CategoryRow(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AccountsManager(
+    canManageDirectories: Boolean,
+    directoryPermissionMessage: String,
     accounts: List<Account>,
     accountName: String,
     accountType: String,
@@ -1817,6 +1873,13 @@ private fun AccountsManager(
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Счета и кошельки", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            if (!canManageDirectories) {
+                Text(
+                    directoryPermissionMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.secondary
+                )
+            }
             if (accounts.isEmpty()) {
                 Text(
                     text = "Создайте первый счёт, чтобы учитывать наличные, карты и вклады.",
@@ -1836,11 +1899,15 @@ private fun AccountsManager(
                 value = accountName,
                 onValueChange = onNameChange,
                 label = { Text("Название") },
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                enabled = canManageDirectories
             )
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 typeOptions.forEach { (value, label) ->
-                    OutlinedButton(onClick = { onTypeChange(value) }, enabled = accountType != value) {
+                    OutlinedButton(
+                        onClick = { onTypeChange(value) },
+                        enabled = canManageDirectories && accountType != value
+                    ) {
                         Text(label)
                     }
                 }
@@ -1849,23 +1916,28 @@ private fun AccountsManager(
                 value = accountCurrency,
                 onValueChange = onCurrencyChange,
                 label = { Text("Валюта") },
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                enabled = canManageDirectories
             )
             OutlinedTextField(
                 value = accountInitial,
                 onValueChange = onInitialChange,
                 label = { Text("Начальный баланс (в минорных единицах)") },
                 modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = androidx.compose.ui.text.input.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number)
+                keyboardOptions = androidx.compose.ui.text.input.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                enabled = canManageDirectories
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = accountShared, onCheckedChange = onSharedChange)
+                Checkbox(checked = accountShared, onCheckedChange = onSharedChange, enabled = canManageDirectories)
                 Column(modifier = Modifier.padding(start = 8.dp)) {
                     Text("Общий счёт семьи", style = MaterialTheme.typography.bodyMedium)
                     Text("Снимите флажок, чтобы сделать счёт личным.", style = MaterialTheme.typography.bodySmall)
                 }
             }
-            Button(onClick = onCreate, enabled = !isLoading && accountName.isNotBlank()) {
+            Button(
+                onClick = onCreate,
+                enabled = canManageDirectories && !isLoading && accountName.isNotBlank()
+            ) {
                 Text("Создать счёт")
             }
             if (message.isNotEmpty()) {

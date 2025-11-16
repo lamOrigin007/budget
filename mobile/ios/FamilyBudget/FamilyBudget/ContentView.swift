@@ -122,6 +122,11 @@ struct ContentView: View {
     @State private var densitySetting: String = "comfortable"
     @State private var showArchivedSetting: Bool = false
     @State private var showTotalsSetting: Bool = true
+
+    private let directoryPermissionHint = "Управлять справочниками могут только владелец семьи и взрослые участники. Остальные участники видят их в режиме чтения."
+    private var canManageDirectories: Bool {
+        user?.isDirectoryAdmin ?? false
+    }
     @State private var supportedCurrencies: [String] = ["RUB", "USD", "EUR"]
 
     var body: some View {
@@ -211,7 +216,7 @@ struct ContentView: View {
                     membersSection(userId: user.id)
                     accountsSection(userId: user.id)
                     categoryForm(userId: user.id)
-                    categoryLists(userId: user.id)
+                    categoryLists(userId: user.id, canManageDirectories: canManageDirectories)
                     plannedOperationsSection(user: user)
                     Divider()
                     transactionFilters()
@@ -734,6 +739,10 @@ struct ContentView: View {
             categoryMessage = "Название категории обязательно"
             return
         }
+        guard canManageDirectories else {
+            categoryMessage = directoryPermissionHint
+            return
+        }
         let isEditing = editingCategoryId != nil
         let endpoint: String
         if let editingCategoryId {
@@ -797,6 +806,10 @@ struct ContentView: View {
     }
 
     private func archiveCategory(userId: String, category: Category, archived: Bool) {
+        guard canManageDirectories else {
+            categoryMessage = directoryPermissionHint
+            return
+        }
         guard let url = URL(string: "http://localhost:8080/api/v1/users/\(userId)/categories/\(category.id)/archive") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -848,12 +861,17 @@ struct ContentView: View {
             accountMessage = "Название счёта обязательно"
             return
         }
+        guard canManageDirectories else {
+            accountMessage = directoryPermissionHint
+            return
+        }
 
         guard let url = URL(string: "http://localhost:8080/api/v1/users/\(userId)/accounts") else { return }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(userId, forHTTPHeaderField: "X-User-ID")
 
         let trimmedCurrency = accountCurrencyInput.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         let initialValue = Int64(accountInitialAmount) ?? 0
@@ -1551,6 +1569,11 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Счета и кошельки")
                 .font(.headline)
+            if !canManageDirectories {
+                Text(directoryPermissionHint)
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
             let visibleAccounts = showArchivedSetting ? accounts : accounts.filter { !$0.isArchived }
             if visibleAccounts.isEmpty {
                 Text("Создайте первый счёт, чтобы учитывать наличные, карты и вклады.")
@@ -1574,12 +1597,14 @@ struct ContentView: View {
 
             TextField("Название", text: $accountNameInput)
                 .textFieldStyle(.roundedBorder)
+                .disabled(!canManageDirectories)
 
             Picker("Тип", selection: $accountTypeSelection) {
                 ForEach(AccountKind.allCases, id: \.self) { kind in
                     Text(kind.localizedTitle).tag(kind)
                 }
             }
+            .disabled(!canManageDirectories)
 
             TextField("Валюта", text: Binding(
                 get: { accountCurrencyInput },
@@ -1587,12 +1612,15 @@ struct ContentView: View {
             ))
                 .textFieldStyle(.roundedBorder)
                 .textInputAutocapitalization(.characters)
+                .disabled(!canManageDirectories)
 
             TextField("Начальный баланс (в минорных единицах)", text: $accountInitialAmount)
                 .textFieldStyle(.roundedBorder)
                 .keyboardType(.numberPad)
+                .disabled(!canManageDirectories)
 
             Toggle("Общий счёт семьи", isOn: $accountShared)
+                .disabled(!canManageDirectories)
             Text("Снимите флажок, чтобы сделать счёт личным.")
                 .font(.footnote)
                 .foregroundColor(.secondary)
@@ -1604,7 +1632,11 @@ struct ContentView: View {
                 Text("Добавить счёт")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(isSavingAccount || accountNameInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(
+                isSavingAccount ||
+                accountNameInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                !canManageDirectories
+            )
 
             if !accountMessage.isEmpty {
                 Text(accountMessage)
@@ -1622,18 +1654,27 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(editingCategoryId == nil ? "Новая категория" : "Редактирование категории")
                 .font(.headline)
+            if !canManageDirectories {
+                Text(directoryPermissionHint)
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
             TextField("Название", text: $categoryName)
                 .textFieldStyle(.roundedBorder)
+                .disabled(!canManageDirectories)
             Picker("Тип", selection: $categoryType) {
                 ForEach(CategoryType.allCases, id: \.self) { type in
                     Text(type.localizedTitle).tag(type)
                 }
             }
             .pickerStyle(.segmented)
+            .disabled(!canManageDirectories)
             TextField("Цвет", text: $categoryColor)
                 .textFieldStyle(.roundedBorder)
+                .disabled(!canManageDirectories)
             TextField("Описание", text: $categoryDescription)
                 .textFieldStyle(.roundedBorder)
+                .disabled(!canManageDirectories)
             Menu("Родительская категория: \(parentName)") {
                 Button("Без родителя") {
                     categoryParentId = nil
@@ -1644,6 +1685,7 @@ struct ContentView: View {
                     }
                 }
             }
+            .disabled(!canManageDirectories)
             HStack {
                 Button(action: { saveCategory(for: userId) }) {
                     if isSavingCategory {
@@ -1652,12 +1694,12 @@ struct ContentView: View {
                     Text(editingCategoryId == nil ? "Создать" : "Сохранить")
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(isSavingCategory)
+                .disabled(isSavingCategory || !canManageDirectories)
 
                 if editingCategoryId != nil {
                     Button("Отмена", action: resetCategoryForm)
                         .buttonStyle(.bordered)
-                        .disabled(isSavingCategory)
+                        .disabled(isSavingCategory || !canManageDirectories)
                 }
             }
             if !categoryMessage.isEmpty {
@@ -1669,7 +1711,7 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func categoryLists(userId: String) -> some View {
+    private func categoryLists(userId: String, canManageDirectories: Bool) -> some View {
         let active = activeCategories
         let archived = showArchivedSetting ? archivedCategories : []
         if active.isEmpty && archived.isEmpty {
@@ -1682,7 +1724,7 @@ struct ContentView: View {
                 Text("Активные")
                     .font(.headline)
                 ForEach(active) { category in
-                    categoryRow(userId: userId, category: category, archived: false)
+                    categoryRow(userId: userId, category: category, archived: false, canManageDirectories: canManageDirectories)
                 }
             }
         }
@@ -1691,13 +1733,13 @@ struct ContentView: View {
                 Text("Архив")
                     .font(.headline)
                 ForEach(archived) { category in
-                    categoryRow(userId: userId, category: category, archived: true)
+                    categoryRow(userId: userId, category: category, archived: true, canManageDirectories: canManageDirectories)
                 }
             }
         }
     }
 
-    private func categoryRow(userId: String, category: Category, archived: Bool) -> some View {
+    private func categoryRow(userId: String, category: Category, archived: Bool, canManageDirectories: Bool) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(category.name)
@@ -1723,12 +1765,14 @@ struct ContentView: View {
                         categoryParentId = category.parentId
                     }
                     .buttonStyle(.bordered)
+                    .disabled(!canManageDirectories)
                 }
                 if !category.isSystem {
                     Button(archived ? "Вернуть" : "Архивировать") {
                         archiveCategory(userId: userId, category: category, archived: !archived)
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(!canManageDirectories)
                 }
             }
         }
@@ -2287,6 +2331,10 @@ private struct User: Codable {
     let locale: String
     let currencyDefault: String
     let displaySettings: DisplaySettings
+
+    var isDirectoryAdmin: Bool {
+        role == "owner" || role == "adult"
+    }
 
     enum CodingKeys: String, CodingKey {
         case id

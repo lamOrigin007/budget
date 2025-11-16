@@ -48,6 +48,23 @@ var supportedCurrencies = []string{"RUB", "USD", "EUR", "KZT", "BYN", "UAH", "GB
 
 const currentUserContextKey = "currentUser"
 
+func isAdministrativeRole(role string) bool {
+	role = strings.ToLower(strings.TrimSpace(role))
+	switch role {
+	case "owner", "adult":
+		return true
+	default:
+		return false
+	}
+}
+
+func canManageReferenceData(user *domain.User) bool {
+	if user == nil {
+		return false
+	}
+	return isAdministrativeRole(user.Role)
+}
+
 type RegisterRequest struct {
 	Email      string `json:"email"`
 	Password   string `json:"password"`
@@ -590,6 +607,9 @@ func (h *Handlers) CreateCategory(c echo.Context) error {
 	if err != nil {
 		return h.handleUserAccessError(c, err)
 	}
+	if !canManageReferenceData(user) {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "only administrative users can manage reference data"})
+	}
 
 	var req CategoryRequest
 	if err := c.Bind(&req); err != nil {
@@ -638,6 +658,9 @@ func (h *Handlers) CreateAccount(c echo.Context) error {
 	if err != nil {
 		return h.handleUserAccessError(c, err)
 	}
+	if !canManageReferenceData(user) {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "only administrative users can manage reference data"})
+	}
 
 	var req AccountRequest
 	if err := c.Bind(&req); err != nil {
@@ -679,6 +702,9 @@ func (h *Handlers) UpdateCategory(c echo.Context) error {
 	user, err := h.resolvePathUser(c)
 	if err != nil {
 		return h.handleUserAccessError(c, err)
+	}
+	if !canManageReferenceData(user) {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "only administrative users can manage reference data"})
 	}
 
 	category, err := h.store.GetCategory(c.Request().Context(), categoryID)
@@ -740,6 +766,9 @@ func (h *Handlers) ToggleCategoryArchive(c echo.Context) error {
 	user, err := h.resolvePathUser(c)
 	if err != nil {
 		return h.handleUserAccessError(c, err)
+	}
+	if !canManageReferenceData(user) {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "only administrative users can manage reference data"})
 	}
 
 	category, err := h.store.GetCategory(c.Request().Context(), categoryID)
